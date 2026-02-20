@@ -1,0 +1,13 @@
+## .NET build artifacts
+bin/
+obj/
+*.user
+*.suo
+.vs/
+
+## Task output folders
+tasks/
+
+## OS files
+.DS_Store
+Thumbs.db
