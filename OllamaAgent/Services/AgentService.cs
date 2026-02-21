@@ -114,9 +114,10 @@ public class AgentService
         if (plan is null || string.IsNullOrWhiteSpace(plan.Title) || plan.Steps.Count == 0)
             throw new InvalidOperationException("Ollama returned an empty execution plan.");
 
-        // Build a safe folder name: title + UTC timestamp.
+        // Build a safe folder name: title + UTC timestamp (no spaces or invalid chars).
         var safeTitle = string.Concat(
-            plan.Title.Split(Path.GetInvalidFileNameChars(), StringSplitOptions.RemoveEmptyEntries));
+            plan.Title.Split(Path.GetInvalidFileNameChars(), StringSplitOptions.RemoveEmptyEntries))
+            .Replace(' ', '_');
         var timestamp = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss");
         var outputFolder = Path.Combine(
             Environment.CurrentDirectory, "tasks", $"{safeTitle}_{timestamp}");
@@ -136,7 +137,7 @@ public class AgentService
         await _docker.StartSandboxAsync(cancellationToken);
 
         // Create the workspace directory inside the sandbox.
-        await _docker.ExecuteCommandAsync($"mkdir -p {SandboxWorkDir}", cancellationToken);
+        await _docker.ExecuteCommandAsync($"mkdir -p {SandboxWorkDir}", cancellationToken: cancellationToken);
 
         // ── Phase 3: Execute each step ────────────────────────────────────────
         Console.WriteLine();
@@ -254,7 +255,7 @@ public class AgentService
             {
                 Console.WriteLine($"│  $ {cmd.Command}");
                 var (stdout, stderr, exitCode) = await _docker.ExecuteCommandAsync(
-                    cmd.Command, cancellationToken);
+                    cmd.Command, SandboxWorkDir, cancellationToken);
 
                 if (!string.IsNullOrEmpty(stdout))
                     Console.WriteLine($"│  stdout: {stdout}");
