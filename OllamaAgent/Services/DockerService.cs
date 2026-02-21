@@ -57,7 +57,7 @@ public class DockerService : IAsyncDisposable
     /// and the exit code.
     /// </summary>
     public async Task<(string Output, string Error, long ExitCode)> ExecuteCommandAsync(
-        string command, CancellationToken cancellationToken = default)
+        string command, string? workingDir = null, CancellationToken cancellationToken = default)
     {
         if (_containerId is null)
             throw new InvalidOperationException("Sandbox has not been started.");
@@ -70,6 +70,7 @@ public class DockerService : IAsyncDisposable
                 AttachStdout = true,
                 AttachStderr = true,
                 Tty = false,
+                WorkingDir = workingDir,
             },
             cancellationToken);
 
@@ -110,7 +111,7 @@ public class DockerService : IAsyncDisposable
             var psi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = "tar",
-                ArgumentList = { "-xf", tarPath, "-C", hostPath },
+                ArgumentList = { "-xf", tarPath, "--strip-components=1", "-C", hostPath },
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,

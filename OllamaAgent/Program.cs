@@ -16,6 +16,9 @@ Console.WriteLine();
 
 var ollama = new OllamaService(ollamaModel, ollamaUrl);
 
+// Ensure the model is downloaded before accepting tasks.
+await ollama.EnsureModelPulledAsync();
+
 // ── Main prompt loop ──────────────────────────────────────────────────────────
 while (true)
 {
