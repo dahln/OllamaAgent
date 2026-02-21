@@ -167,7 +167,9 @@ public class AgentService
         try
         {
             await _docker.CopyFromContainerAsync(SandboxWorkDir, outputFolder, cancellationToken);
-            filesCopied = Directory.EnumerateFiles(outputFolder, "*", SearchOption.AllDirectories).Any();
+            filesCopied = new DirectoryInfo(outputFolder)
+                .EnumerateFiles("*", SearchOption.AllDirectories)
+                .Any(f => f.Length > 0);
             if (filesCopied)
                 Console.WriteLine($"  Files saved to: {outputFolder}");
         }
@@ -303,7 +305,10 @@ public class AgentService
                     stepOutput.AppendLine(stdout);
                 }
                 if (!string.IsNullOrEmpty(stderr))
+                {
                     Console.WriteLine($"│  stderr: {stderr}");
+                    stepOutput.AppendLine($"stderr: {stderr}");
+                }
                 Console.WriteLine($"│  exit: {exitCode}");
                 stepOutput.AppendLine($"```");
                 stepOutput.AppendLine();
