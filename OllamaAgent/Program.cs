@@ -2,7 +2,7 @@
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 // Override with environment variables OLLAMA_MODEL and OLLAMA_URL if needed.
-var ollamaModel = Environment.GetEnvironmentVariable("OLLAMA_MODEL") ?? "llama3.2";
+var ollamaModel = Environment.GetEnvironmentVariable("OLLAMA_MODEL") ?? "gemma3:4b";
 var ollamaUrl = Environment.GetEnvironmentVariable("OLLAMA_URL") ?? "http://localhost:11434";
 
 // ── Banner ────────────────────────────────────────────────────────────────────
