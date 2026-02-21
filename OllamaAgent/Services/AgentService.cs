@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using OllamaAgent.Models;
 
@@ -145,9 +146,11 @@ public class AgentService
         Console.WriteLine("  Phase 3 – Executing steps…");
         Console.WriteLine("══════════════════════════════════════════");
 
+        var stepOutputs = new List<string>();
         foreach (var step in plan.Steps.OrderBy(s => s.StepNumber))
         {
-            await ExecuteStepAsync(step, userPrompt, cancellationToken);
+            var output = await ExecuteStepAsync(step, userPrompt, cancellationToken);
+            stepOutputs.Add(output);
         }
 
         // ── Phase 4: Collect deliverables ─────────────────────────────────────
@@ -157,14 +160,37 @@ public class AgentService
         Console.WriteLine("══════════════════════════════════════════");
         Console.WriteLine();
 
+        // Always ensure the output directory exists on the host.
+        Directory.CreateDirectory(outputFolder);
+
+        bool filesCopied = false;
         try
         {
             await _docker.CopyFromContainerAsync(SandboxWorkDir, outputFolder, cancellationToken);
-            Console.WriteLine($"  Files saved to: {outputFolder}");
+            filesCopied = Directory.EnumerateFiles(outputFolder, "*", SearchOption.AllDirectories).Any();
+            if (filesCopied)
+                Console.WriteLine($"  Files saved to: {outputFolder}");
         }
         catch (Exception ex)
         {
             Console.WriteLine($"  Warning: Could not copy files from sandbox – {ex.Message}");
+        }
+
+        // If no files were produced in the workspace, persist the collected execution
+        // output as both a markdown file and a plain-text file so the folder is never empty.
+        if (!filesCopied)
+        {
+            Console.WriteLine("  Workspace was empty – saving execution output as text files.");
+
+            var markdownContent = BuildMarkdownSummary(plan.Title, userPrompt, stepOutputs);
+            var mdPath = Path.Combine(outputFolder, "results.md");
+            var txtPath = Path.Combine(outputFolder, "results.txt");
+
+            await File.WriteAllTextAsync(mdPath, markdownContent, cancellationToken);
+            await File.WriteAllTextAsync(txtPath, StripMarkdown(markdownContent), cancellationToken);
+
+            Console.WriteLine($"  Saved: {mdPath}");
+            Console.WriteLine($"  Saved: {txtPath}");
         }
 
         // ── Phase 5: Teardown ─────────────────────────────────────────────────
@@ -183,12 +209,17 @@ public class AgentService
     // Private helpers
     // ─────────────────────────────────────────────────────────────────────────
 
-    private async Task ExecuteStepAsync(
+    private async Task<string> ExecuteStepAsync(
         ExecutionStep step, string originalTask, CancellationToken cancellationToken)
     {
         Console.WriteLine();
         Console.WriteLine($"┌─ Step {step.StepNumber}: {step.Description}");
         Console.WriteLine("│");
+
+        // Accumulate text output from this step for use as a fallback if the workspace is empty.
+        var stepOutput = new StringBuilder();
+        stepOutput.AppendLine($"## Step {step.StepNumber}: {step.Description}");
+        stepOutput.AppendLine();
 
         var stepMessages = new List<OllamaChatMessage>
         {
@@ -197,15 +228,20 @@ public class AgentService
                 Role = "system",
                 Content = $$"""
                     You are an AI agent executing a task inside a Docker sandbox (Ubuntu 24.04).
-                    The working directory is "{{SandboxWorkDir}}". All deliverables must be placed there.
-                    
+                    The working directory is "{{SandboxWorkDir}}". ALL output and deliverables MUST be saved as files in that directory.
+
+                    IMPORTANT: If the task produces any textual output (reports, summaries, analysis, answers, code, etc.),
+                    you MUST write it to a file in {{SandboxWorkDir}}. Use markdown (.md) files for all text content.
+                    Format all text using proper markdown (headings, lists, code blocks, bold/italic, etc.).
+                    Never rely solely on stdout — always save results to files.
+
                     For each response, output ONLY valid JSON matching this structure:
                     {
                       "command": "<shell command to run, or empty string if this step is done>",
                       "done": <true when step is complete, false otherwise>,
                       "message": "<brief explanation of what you are doing or what was accomplished>"
                     }
-                    
+
                     Original task: {{originalTask}}
                     """,
             },
@@ -243,6 +279,8 @@ public class AgentService
             }
 
             Console.WriteLine($"│  AI: {cmd.Message}");
+            stepOutput.AppendLine($"**{cmd.Message}**");
+            stepOutput.AppendLine();
 
             if (cmd.Done)
             {
@@ -254,14 +292,21 @@ public class AgentService
             if (!string.IsNullOrWhiteSpace(cmd.Command))
             {
                 Console.WriteLine($"│  $ {cmd.Command}");
+                stepOutput.AppendLine($"```shell");
+                stepOutput.AppendLine($"$ {cmd.Command}");
                 var (stdout, stderr, exitCode) = await _docker.ExecuteCommandAsync(
                     cmd.Command, SandboxWorkDir, cancellationToken);
 
                 if (!string.IsNullOrEmpty(stdout))
+                {
                     Console.WriteLine($"│  stdout: {stdout}");
+                    stepOutput.AppendLine(stdout);
+                }
                 if (!string.IsNullOrEmpty(stderr))
                     Console.WriteLine($"│  stderr: {stderr}");
                 Console.WriteLine($"│  exit: {exitCode}");
+                stepOutput.AppendLine($"```");
+                stepOutput.AppendLine();
 
                 // Feed the result back to the AI.
                 stepMessages.Add(new OllamaChatMessage
@@ -283,5 +328,70 @@ public class AgentService
             Console.WriteLine("│  ⚠ Max iterations reached – moving to next step.");
 
         Console.WriteLine("└─────────────────────────────────────────");
+        return stepOutput.ToString();
+    }
+
+    /// <summary>
+    /// Builds a markdown document that summarizes the task and all step outputs.
+    /// Used as a fallback when the sandbox workspace contains no files.
+    /// </summary>
+    private static string BuildMarkdownSummary(
+        string taskTitle, string originalTask, IEnumerable<string> stepOutputs)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine($"# {taskTitle}");
+        sb.AppendLine();
+        sb.AppendLine($"**Task:** {originalTask}");
+        sb.AppendLine();
+        sb.AppendLine("---");
+        sb.AppendLine();
+        foreach (var output in stepOutputs)
+        {
+            sb.AppendLine(output);
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Removes common markdown syntax tokens to produce a plain-text version of a markdown string.
+    /// </summary>
+    private static string StripMarkdown(string markdown)
+    {
+        var lines = markdown.Split('\n');
+        var result = new StringBuilder();
+        bool inCodeBlock = false;
+
+        foreach (var rawLine in lines)
+        {
+            var line = rawLine.TrimEnd('\r');
+
+            // Toggle code-block state but drop the fence lines themselves.
+            if (line.StartsWith("```"))
+            {
+                inCodeBlock = !inCodeBlock;
+                continue;
+            }
+
+            if (!inCodeBlock)
+            {
+                // Strip ATX headings (# Heading → Heading).
+                if (line.StartsWith("#"))
+                    line = line.TrimStart('#').TrimStart();
+
+                // Strip horizontal rules.
+                if (line == "---" || line == "***" || line == "___")
+                {
+                    result.AppendLine();
+                    continue;
+                }
+
+                // Strip bold/italic markers (**text**, *text*, __text__, _text_).
+                line = line.Replace("**", "").Replace("__", "").Replace("*", "").Replace("_", "");
+            }
+
+            result.AppendLine(line);
+        }
+
+        return result.ToString();
     }
 }
