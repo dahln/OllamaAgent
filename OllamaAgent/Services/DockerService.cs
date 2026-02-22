@@ -11,7 +11,7 @@ public class DockerService : IAsyncDisposable
     private readonly DockerClient _client;
     private string? _containerId;
 
-    private const string SandboxImage = "ghcr.io/dahln/ollamaagent-sandbox:latest";
+    private const string SandboxImage = "ghcr.io/dahln/lunasandbox:latest";
 
     public DockerService()
     {

@@ -1,4 +1,4 @@
-# OllamaAgent Sandbox Image
+# LunaSandbox
 # Supports linux/amd64 (x86-64) and linux/arm64 (Raspberry Pi 4/5)
 FROM ubuntu:24.04
 

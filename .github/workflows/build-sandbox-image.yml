@@ -11,7 +11,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/ollamaagent-sandbox
+  IMAGE_NAME: ${{ github.repository_owner }}/lunasandbox
 
 jobs:
   build-and-push:

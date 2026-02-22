@@ -1,4 +1,4 @@
-# OllamaAgent Sandbox Image
+# LunaSandbox
 
 A multi-architecture Docker image (linux/amd64 + linux/arm64) used as the isolated execution sandbox for each OllamaAgent task.
 
@@ -23,14 +23,14 @@ The default working directory inside the container is `/workspace`.
 # From the repository root
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
-  -t ollamaagent-sandbox:latest \
+  -t lunasandbox:latest \
   ./SandboxImage
 ```
 
 For a single-arch local build (faster):
 
 ```bash
-docker build -t ollamaagent-sandbox:latest ./SandboxImage
+docker build -t lunasandbox:latest ./SandboxImage
 ```
 
 ---
@@ -45,8 +45,8 @@ The workflow at `.github/workflows/build-sandbox-image.yml` triggers automatical
 The workflow builds a multi-arch image for `linux/amd64` **and** `linux/arm64` and pushes it to the **GitHub Container Registry (GHCR)**:
 
 ```
-ghcr.io/<owner>/ollamaagent-sandbox:latest
-ghcr.io/<owner>/ollamaagent-sandbox:sha-<short-sha>
+ghcr.io/<owner>/lunasandbox:latest
+ghcr.io/<owner>/lunasandbox:sha-<short-sha>
 ```
 
 Replace `<owner>` with the GitHub username or organisation that owns this repository (e.g. `dahln`).
@@ -59,8 +59,8 @@ No secrets need to be configured manually. The workflow uses the built-in `GITHU
 
 By default a newly published GHCR package is **private**. To make it publicly pullable:
 
-1. Go to **github.com/\<owner\>/ollamaagent-sandbox** (the package page).  
-   Direct link: `https://github.com/users/<owner>/packages/container/ollamaagent-sandbox`
+1. Go to **github.com/\<owner\>/lunasandbox** (the package page).  
+   Direct link: `https://github.com/users/<owner>/packages/container/lunasandbox`
 2. Click **Package settings** (bottom-right of the package page).
 3. Scroll to **Danger Zone → Change visibility** and set it to **Public**.
 
@@ -72,10 +72,10 @@ Because the image is on GHCR (not Docker Hub), use the full registry path:
 
 ```bash
 # Pull the latest image
-docker pull ghcr.io/dahln/ollamaagent-sandbox:latest
+docker pull ghcr.io/dahln/lunasandbox:latest
 
 # Pull a specific commit build
-docker pull ghcr.io/dahln/ollamaagent-sandbox:sha-<short-sha>
+docker pull ghcr.io/dahln/lunasandbox:sha-<short-sha>
 ```
 
 If the package is still private, authenticate first:
@@ -93,7 +93,7 @@ echo "<YOUR_PAT>" | docker login ghcr.io -u <your-github-username> --password-st
 ```bash
 docker run --rm -it \
   -v "$(pwd)/workspace:/workspace" \
-  ghcr.io/dahln/ollamaagent-sandbox:latest
+  ghcr.io/dahln/lunasandbox:latest
 ```
 
 ---
@@ -104,7 +104,7 @@ Update the `DockerService` in the main application to reference the GHCR image i
 
 ```csharp
 // In Services/DockerService.cs, change the image name to:
-private const string SandboxImage = "ghcr.io/dahln/ollamaagent-sandbox:latest";
+private const string SandboxImage = "ghcr.io/dahln/lunasandbox:latest";
 ```
 
-OllamaAgent will pull the image automatically the first time it runs (requires the host machine to be logged in to GHCR, or the package to be public).
+OllamaAgent will check that the image is present locally before accepting any tasks.
