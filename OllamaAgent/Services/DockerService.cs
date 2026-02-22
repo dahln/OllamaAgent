@@ -19,23 +19,56 @@ public class DockerService : IAsyncDisposable
     }
 
     /// <summary>
-    /// Verifies that the sandbox image is available locally. Throws if it is not found.
-    /// Call this once at application startup so the process can exit before accepting tasks.
+    /// Attempts to pull the sandbox image from the registry. If the pull fails, checks
+    /// whether the image is already available locally. Throws if neither succeeds so the
+    /// caller can exit the process before accepting any tasks.
     /// </summary>
     public static async Task EnsureSandboxImageExistsAsync(CancellationToken cancellationToken = default)
     {
         using var client = new DockerClientConfiguration().CreateClient();
+
+        Console.WriteLine($"[Docker] Pulling sandbox image '{SandboxImage}'…");
+
         try
         {
-            await client.Images.InspectImageAsync(SandboxImage, cancellationToken);
-            Console.WriteLine($"[Docker] Sandbox image found: {SandboxImage}");
+            // Split "registry/image:tag" into FromImage + Tag for the API.
+            var lastColon = SandboxImage.LastIndexOf(':');
+            var fromImage = lastColon >= 0 ? SandboxImage[..lastColon] : SandboxImage;
+            var tag = lastColon >= 0 ? SandboxImage[(lastColon + 1)..] : "latest";
+
+            var progress = new Progress<JSONMessage>(msg =>
+            {
+                if (!string.IsNullOrEmpty(msg.Status))
+                    Console.WriteLine($"[Docker] {msg.Status}");
+            });
+
+            await client.Images.CreateImageAsync(
+                new ImagesCreateParameters { FromImage = fromImage, Tag = tag },
+                null,
+                progress,
+                cancellationToken);
+
+            Console.WriteLine($"[Docker] Sandbox image ready: {SandboxImage}");
         }
-        catch (Docker.DotNet.DockerImageNotFoundException)
+        catch (Exception ex)
         {
-            throw new InvalidOperationException(
-                $"Sandbox image '{SandboxImage}' was not found on this machine.\n" +
-                $"Pull it first with:\n" +
-                $"  docker pull {SandboxImage}");
+            Console.WriteLine($"[Docker] Pull failed: {ex.Message}");
+            Console.WriteLine("[Docker] Checking for a locally cached image…");
+
+            // Fall back to a locally cached copy of the image.
+            try
+            {
+                await client.Images.InspectImageAsync(SandboxImage, cancellationToken);
+                Console.WriteLine($"[Docker] Sandbox image found locally: {SandboxImage}");
+            }
+            catch (Docker.DotNet.DockerImageNotFoundException)
+            {
+                throw new InvalidOperationException(
+                    $"Sandbox image '{SandboxImage}' could not be pulled and is not available locally.\n" +
+                    $"Pull error: {ex.Message}\n" +
+                    $"Please ensure Docker has access to the registry, or pull it manually with:\n" +
+                    $"  docker pull {SandboxImage}");
+            }
         }
     }
 
