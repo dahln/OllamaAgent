@@ -1,5 +1,7 @@
 # OllamaAgent
 
+***NOTE: This project is a continuation of my LUNA project. Excludes all the queue, scheduling, and github stuff for now and allows me to focus on building the agentic flow. My current plan is that this will become the V2 AI-Agent for LUNA. Thus far, it has better (and mixed) results.*** 
+
 A .NET 10 C# console application that acts as an autonomous AI agent, powered by a local [Ollama](https://ollama.ai) instance and a Docker sandbox.
 
 ## Features
