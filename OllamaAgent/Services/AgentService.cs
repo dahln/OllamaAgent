@@ -160,39 +160,35 @@ public class AgentService
         Console.WriteLine("══════════════════════════════════════════");
         Console.WriteLine();
 
-        // Always ensure the output directory exists on the host.
-        Directory.CreateDirectory(outputFolder);
+        var executionFolder   = Path.Combine(outputFolder, "Execution");
+        var deliverableFolder = Path.Combine(outputFolder, "Deliverable");
 
-        bool filesCopied = false;
+        Directory.CreateDirectory(executionFolder);
+        Directory.CreateDirectory(deliverableFolder);
+
+        // Always persist the execution log so the Execution folder is never empty.
+        var executionMarkdown = BuildMarkdownSummary(plan.Title, userPrompt, stepOutputs);
+        var execMdPath  = Path.Combine(executionFolder, "execution.md");
+        var execTxtPath = Path.Combine(executionFolder, "execution.txt");
+        await File.WriteAllTextAsync(execMdPath,  executionMarkdown,                    cancellationToken);
+        await File.WriteAllTextAsync(execTxtPath, StripMarkdown(executionMarkdown),     cancellationToken);
+        Console.WriteLine($"  Execution log saved to: {executionFolder}");
+
+        // Copy whatever the sandbox produced into the Deliverable folder.
         try
         {
-            await _docker.CopyFromContainerAsync(SandboxWorkDir, outputFolder, cancellationToken);
-            filesCopied = new DirectoryInfo(outputFolder)
+            await _docker.CopyFromContainerAsync(SandboxWorkDir, deliverableFolder, cancellationToken);
+            bool filesCopied = new DirectoryInfo(deliverableFolder)
                 .EnumerateFiles("*", SearchOption.AllDirectories)
                 .Any(f => f.Length > 0);
             if (filesCopied)
-                Console.WriteLine($"  Files saved to: {outputFolder}");
+                Console.WriteLine($"  Deliverable files saved to: {deliverableFolder}");
+            else
+                Console.WriteLine("  No deliverable files were produced in the sandbox workspace.");
         }
         catch (Exception ex)
         {
             Console.WriteLine($"  Warning: Could not copy files from sandbox – {ex.Message}");
-        }
-
-        // If no files were produced in the workspace, persist the collected execution
-        // output as both a markdown file and a plain-text file so the folder is never empty.
-        if (!filesCopied)
-        {
-            Console.WriteLine("  Workspace was empty – saving execution output as text files.");
-
-            var markdownContent = BuildMarkdownSummary(plan.Title, userPrompt, stepOutputs);
-            var mdPath = Path.Combine(outputFolder, "results.md");
-            var txtPath = Path.Combine(outputFolder, "results.txt");
-
-            await File.WriteAllTextAsync(mdPath, markdownContent, cancellationToken);
-            await File.WriteAllTextAsync(txtPath, StripMarkdown(markdownContent), cancellationToken);
-
-            Console.WriteLine($"  Saved: {mdPath}");
-            Console.WriteLine($"  Saved: {txtPath}");
         }
 
         // ── Phase 5: Teardown ─────────────────────────────────────────────────
