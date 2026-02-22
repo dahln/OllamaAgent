@@ -11,7 +11,7 @@ public class DockerService : IAsyncDisposable
     private readonly DockerClient _client;
     private string? _containerId;
 
-    private const string SandboxImage = "ubuntu:24.04";
+    private const string SandboxImage = "ghcr.io/dahln/ollamaagent-sandbox:latest";
 
     public DockerService()
     {
@@ -19,20 +19,32 @@ public class DockerService : IAsyncDisposable
     }
 
     /// <summary>
-    /// Pulls the sandbox image (if needed) and starts a long-running container.
+    /// Verifies that the sandbox image is available locally. Throws if it is not found.
+    /// Call this once at application startup so the process can exit before accepting tasks.
+    /// </summary>
+    public static async Task EnsureSandboxImageExistsAsync(CancellationToken cancellationToken = default)
+    {
+        using var client = new DockerClientConfiguration().CreateClient();
+        try
+        {
+            await client.Images.InspectImageAsync(SandboxImage, cancellationToken);
+            Console.WriteLine($"[Docker] Sandbox image found: {SandboxImage}");
+        }
+        catch (Docker.DotNet.DockerImageNotFoundException)
+        {
+            throw new InvalidOperationException(
+                $"Sandbox image '{SandboxImage}' was not found on this machine.\n" +
+                $"Pull it first with:\n" +
+                $"  docker pull {SandboxImage}");
+        }
+    }
+
+    /// <summary>
+    /// Starts a long-running container from the pre-pulled sandbox image.
     /// </summary>
     public async Task StartSandboxAsync(CancellationToken cancellationToken = default)
     {
-        Console.WriteLine("[Docker] Pulling sandbox image (ubuntu:24.04)…");
-        await _client.Images.CreateImageAsync(
-            new ImagesCreateParameters { FromImage = "ubuntu", Tag = "24.04" },
-            null,
-            new Progress<JSONMessage>(msg =>
-            {
-                if (!string.IsNullOrEmpty(msg.Status))
-                    Console.WriteLine($"  {msg.Status}{(string.IsNullOrEmpty(msg.ProgressMessage) ? "" : " – " + msg.ProgressMessage)}");
-            }),
-            cancellationToken);
+        Console.WriteLine($"[Docker] Starting sandbox ({SandboxImage})…");
 
         Console.WriteLine("[Docker] Creating sandbox container…");
         var response = await _client.Containers.CreateContainerAsync(

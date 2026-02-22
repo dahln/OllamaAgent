@@ -19,6 +19,20 @@ var ollama = new OllamaService(ollamaModel, ollamaUrl);
 // Ensure the model is downloaded before accepting tasks.
 await ollama.EnsureModelPulledAsync();
 
+// Ensure the sandbox image exists locally before accepting tasks.
+// If the image is missing the application exits immediately with an error.
+try
+{
+    await DockerService.EnsureSandboxImageExistsAsync();
+}
+catch (Exception ex)
+{
+    Console.ForegroundColor = ConsoleColor.Red;
+    Console.WriteLine($"[Error] {ex.Message}");
+    Console.ResetColor();
+    return;
+}
+
 // ── Main prompt loop ──────────────────────────────────────────────────────────
 while (true)
 {
