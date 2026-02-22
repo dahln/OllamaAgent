@@ -8,7 +8,16 @@ A multi-architecture Docker image (linux/amd64 + linux/arm64) used as the isolat
 |---|---|
 | Ubuntu 24.04 | Base OS |
 | .NET 10 SDK | Installed via the official Microsoft install script |
+| dotnet-ef | Entity Framework Core global tool |
+| dotnet-aspnet-codegenerator | ASP.NET Core scaffolding global tool |
 | Node.js & npm | From Ubuntu's default package repository |
+| TypeScript & ts-node | Global TypeScript compiler and runner |
+| @angular/cli | Angular project scaffolding |
+| create-react-app | React project scaffolding |
+| @vue/cli | Vue.js project scaffolding |
+| vite | Next-generation front-end build tool |
+| next | Next.js framework CLI |
+| eslint & prettier | Linting and code formatting |
 | Python 3 | Includes `pip` and `venv` |
 | SQLite 3 | For lightweight database operations |
 | nano | Text editor |
@@ -76,14 +85,6 @@ docker pull ghcr.io/dahln/lunasandbox:latest
 
 # Pull a specific commit build
 docker pull ghcr.io/dahln/lunasandbox:sha-<short-sha>
-```
-
-If the package is still private, authenticate first:
-
-```bash
-# Create a Personal Access Token (PAT) with read:packages scope at
-# https://github.com/settings/tokens/new
-echo "<YOUR_PAT>" | docker login ghcr.io -u <your-github-username> --password-stdin
 ```
 
 ---

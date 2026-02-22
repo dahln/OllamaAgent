@@ -34,6 +34,24 @@ ENV DOTNET_CLI_TELEMETRY_OPTOUT=1
 ENV DOTNET_ROOT=/usr/share/dotnet
 ENV PATH="$PATH:/usr/share/dotnet"
 
+# ── .NET global tools ────────────────────────────────────────────────────────
+RUN dotnet tool install --global dotnet-ef \
+    && dotnet tool install --global dotnet-aspnet-codegenerator
+
+ENV PATH="$PATH:/root/.dotnet/tools"
+
+# ── Node.js / npm global tools ───────────────────────────────────────────────
+RUN npm install -g \
+        typescript \
+        ts-node \
+        @angular/cli \
+        create-react-app \
+        @vue/cli \
+        vite \
+        next \
+        eslint \
+        prettier
+
 # ── Workspace ────────────────────────────────────────────────────────────────
 WORKDIR /workspace
 
