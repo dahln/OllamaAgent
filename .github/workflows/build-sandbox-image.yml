@@ -3,7 +3,7 @@ name: Build & Publish Sandbox Image
 on:
   push:
     branches:
-      - main
+      - master
     paths:
       - 'SandboxImage/Dockerfile'
       - '.github/workflows/build-sandbox-image.yml'
