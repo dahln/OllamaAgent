@@ -178,13 +178,15 @@ public class AgentService
             Console.WriteLine($"  Warning: Could not copy files from sandbox – {ex.Message}");
         }
 
-        // If no files were produced in the workspace, persist the collected execution
-        // output as both a markdown file and a plain-text file so the folder is never empty.
+        // If no files were produced in the workspace, ask the AI to synthesise the actual
+        // deliverable and persist it as both a markdown file and a plain-text file so the
+        // folder is never empty.
         if (!filesCopied)
         {
-            Console.WriteLine("  Workspace was empty – saving execution output as text files.");
+            Console.WriteLine("  Workspace was empty – generating deliverable from execution context…");
 
-            var markdownContent = BuildMarkdownSummary(plan.Title, userPrompt, stepOutputs);
+            var markdownContent = await GenerateDeliverableAsync(
+                plan.Title, userPrompt, stepOutputs, cancellationToken);
             var mdPath = Path.Combine(outputFolder, "results.md");
             var txtPath = Path.Combine(outputFolder, "results.txt");
 
@@ -334,6 +336,82 @@ public class AgentService
 
         Console.WriteLine("└─────────────────────────────────────────");
         return stepOutput.ToString();
+    }
+
+    // Maximum characters of execution context forwarded to the deliverable-synthesis prompt.
+    private const int MaxExecutionContextChars = 8_000;
+
+    /// <summary>
+    /// Asks Ollama to produce the actual deliverable (essay, code, report, etc.) based on
+    /// the original task and the execution context gathered during the step loop.
+    /// Used as a fallback when the sandbox workspace contains no files.
+    /// </summary>
+    private async Task<string> GenerateDeliverableAsync(
+        string taskTitle, string originalTask, IList<string> stepOutputs,
+        CancellationToken cancellationToken)
+    {
+        var fullContext = string.Join("\n\n", stepOutputs);
+        var executionContext = fullContext.Length > MaxExecutionContextChars
+            ? fullContext[^MaxExecutionContextChars..]
+            : fullContext;
+
+        var messages = new List<OllamaChatMessage>
+        {
+            new()
+            {
+                Role = "system",
+                Content = """
+                    You are an AI assistant that produces deliverables from task execution context.
+                    The user requested a specific output. Based on the original task and the execution
+                    steps that were completed, produce the actual deliverable — the final output the
+                    user asked for. Do NOT describe what was done; just produce the result itself.
+
+                    Examples:
+                    - If asked to write an essay, produce the complete essay.
+                    - If asked to write code, produce the complete, working code.
+                    - If asked for a report, produce the complete report.
+                    - If asked for a summary, produce the complete summary.
+
+                    Format your response as markdown.
+                    """,
+            },
+            new()
+            {
+                Role = "user",
+                Content = $"""
+                    Original task: {originalTask}
+
+                    Execution context (steps completed):
+                    {executionContext}
+
+                    Based on the above, produce the actual deliverable for the original task.
+                    """,
+            },
+        };
+
+        Console.WriteLine();
+        string deliverable;
+        try
+        {
+            deliverable = await _ollama.StreamChatAsync(messages, cancellationToken: cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  Warning: Could not generate deliverable – {ex.Message}");
+            Console.WriteLine("  Falling back to execution log.");
+            return BuildMarkdownSummary(taskTitle, originalTask, stepOutputs);
+        }
+        Console.WriteLine();
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"# {taskTitle}");
+        sb.AppendLine();
+        sb.AppendLine($"**Task:** {originalTask}");
+        sb.AppendLine();
+        sb.AppendLine("---");
+        sb.AppendLine();
+        sb.AppendLine(deliverable);
+        return sb.ToString();
     }
 
     /// <summary>
