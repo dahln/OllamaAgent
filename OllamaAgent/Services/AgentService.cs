@@ -225,7 +225,7 @@ public class AgentService
             {
                 Role = "system",
                 Content = $$"""
-                    You are an AI agent executing a task inside a Docker sandbox (Ubuntu 24.04).
+                    You are an AI agent executing a task inside a Docker sandbox (Ubuntu 24.04, with .NET 10 SDK, dotnet-ef, dotnet-aspnet-codegenerator, Node.js, npm, TypeScript, ts-node, Angular CLI, create-react-app, Vue CLI, Vite, Next.js, ESLint, Prettier, Python 3, SQLite 3, and nano pre-installed).
                     The working directory is "{{SandboxWorkDir}}". ALL output and deliverables MUST be saved as files in that directory.
 
                     IMPORTANT: If the task produces any textual output (reports, summaries, analysis, answers, code, etc.),
