@@ -58,6 +58,12 @@ public class AgentService
     // Maximum command iterations per step before forcibly moving on.
     private const int MaxIterationsPerStep = 20;
 
+    // Minimum file size (bytes) that counts as a non-trivial deliverable in the workspace.
+    private const int MinimumDeliverableFileSizeBytes = 500;
+
+    // Maximum directory depth searched when looking for deliverable files.
+    private const int MaxWorkspaceFindDepth = 5;
+
     // Working directory inside the sandbox that will be copied to the host on completion.
     private const string SandboxWorkDir = "/workspace";
 
@@ -160,6 +166,15 @@ public class AgentService
             var output = await ExecuteStepAsync(step, userPrompt, cancellationToken);
             stepOutputs.Add(output);
         }
+
+        // ── Phase 3.5: Finalize deliverables ──────────────────────────────────
+        Console.WriteLine();
+        Console.WriteLine("══════════════════════════════════════════");
+        Console.WriteLine("  Phase 3.5 – Verifying deliverables…");
+        Console.WriteLine("══════════════════════════════════════════");
+        Console.WriteLine();
+
+        await FinalizeDeliverablesAsync(userPrompt, plan.Title, stepOutputs, cancellationToken);
 
         // ── Phase 4: Collect deliverables ─────────────────────────────────────
         Console.WriteLine();
@@ -345,6 +360,158 @@ public class AgentService
 
         Console.WriteLine("└─────────────────────────────────────────");
         return stepOutput.ToString();
+    }
+
+    /// <summary>
+    /// Phase 3.5: After all steps complete, verifies that the sandbox workspace contains
+    /// non-trivial deliverable files. If no file larger than <see cref="MinimumDeliverableFileSizeBytes"/>
+    /// bytes is found, runs an iterative AI-driven finalization loop that uses the accumulated
+    /// step outputs as research context to generate and write the complete deliverables.
+    /// </summary>
+    private async Task FinalizeDeliverablesAsync(
+        string originalTask,
+        string taskTitle,
+        IReadOnlyList<string> stepOutputs,
+        CancellationToken cancellationToken)
+    {
+        // List workspace, noting any files larger than 500 bytes.
+        var (lsOutput, _, _) = await _docker.ExecuteCommandAsync(
+            $"ls -lhR {SandboxWorkDir} 2>/dev/null || echo 'workspace is empty'",
+            cancellationToken: cancellationToken);
+
+        var (substantialFiles, _, _) = await _docker.ExecuteCommandAsync(
+            $"find {SandboxWorkDir} -maxdepth {MaxWorkspaceFindDepth} -type f -size +{MinimumDeliverableFileSizeBytes}c 2>/dev/null",
+            cancellationToken: cancellationToken);
+
+        if (!string.IsNullOrWhiteSpace(substantialFiles))
+        {
+            Console.WriteLine("  Workspace already contains non-empty deliverable files.");
+            Console.WriteLine($"  Files: {substantialFiles.Replace('\n', ' ')}");
+            return;
+        }
+
+        Console.WriteLine($"  Workspace state:\n{lsOutput}");
+        Console.WriteLine("  No substantial deliverable files found – running finalization.");
+
+        // Build a context string from the gathered research / step outputs.
+        var researchContext = new StringBuilder();
+        researchContext.AppendLine("## Research and Work Completed So Far");
+        researchContext.AppendLine();
+        foreach (var output in stepOutputs)
+            researchContext.AppendLine(output);
+
+        var finalMessages = new List<OllamaChatMessage>
+        {
+            new()
+            {
+                Role = "system",
+                Content = $$"""
+                    You are an AI agent finalizing a task inside a Docker sandbox (Ubuntu 24.04).
+                    The working directory is "{{SandboxWorkDir}}". ALL deliverables MUST be saved as files there.
+
+                    The previous execution steps finished, but the workspace deliverable files are empty or missing.
+                    Your job is to use the research and information gathered below to write COMPLETE, FULL deliverables.
+
+                    CRITICAL RULES:
+                    1. Write the COMPLETE, FULL content to files in {{SandboxWorkDir}}.
+                       Do NOT write stubs, placeholders, or headers only.
+                    2. Use a heredoc to write full content, for example:
+                         cat > {{SandboxWorkDir}}/output.md << 'HEREDOC'
+                         [full content here]
+                         HEREDOC
+                    3. After writing, verify with `ls -lh {{SandboxWorkDir}}` that the file is non-empty.
+                    4. Only set "done": true after deliverable files with COMPLETE content are confirmed.
+
+                    For each response, output ONLY valid JSON:
+                    {
+                      "command": "<shell command to run, or empty string if done>",
+                      "done": <true when deliverables are written and verified, false otherwise>,
+                      "message": "<brief explanation>"
+                    }
+
+                    Original task: {{originalTask}}
+                    Task title: {{taskTitle}}
+                    """,
+            },
+            new()
+            {
+                Role = "user",
+                Content = $"The workspace deliverable files are empty or missing.\n"
+                         + $"Current workspace state:\n{lsOutput}\n\n"
+                         + $"Use the following research and work to write the complete deliverables:\n\n"
+                         + researchContext.ToString(),
+            },
+        };
+
+        Console.WriteLine();
+        Console.WriteLine("┌─ Finalization step");
+        Console.WriteLine("│");
+
+        bool finalized = false;
+        for (int iteration = 0; iteration < MaxIterationsPerStep; iteration++)
+        {
+            Console.WriteLine($"│  [finalization iteration {iteration + 1}]");
+
+            var rawResponse = await _ollama.StreamChatAsync(
+                finalMessages, format: StepCommandSchema, cancellationToken: cancellationToken);
+
+            StepCommand? cmd;
+            try
+            {
+                cmd = JsonSerializer.Deserialize<StepCommand>(rawResponse, _jsonOptions);
+            }
+            catch (JsonException)
+            {
+                Console.WriteLine("│  ⚠ Could not parse AI response as JSON – stopping finalization.");
+                break;
+            }
+
+            if (cmd is null)
+            {
+                Console.WriteLine("│  ⚠ Null AI response – stopping finalization.");
+                break;
+            }
+
+            Console.WriteLine($"│  AI: {cmd.Message}");
+
+            if (cmd.Done)
+            {
+                Console.WriteLine("│  ✓ Deliverables finalized.");
+                finalized = true;
+                break;
+            }
+
+            if (!string.IsNullOrWhiteSpace(cmd.Command))
+            {
+                Console.WriteLine($"│  $ {cmd.Command}");
+                var (stdout, stderr, exitCode) = await _docker.ExecuteCommandAsync(
+                    cmd.Command, SandboxWorkDir, cancellationToken);
+
+                if (!string.IsNullOrEmpty(stdout))
+                    Console.WriteLine($"│  stdout: {stdout}");
+                if (!string.IsNullOrEmpty(stderr))
+                    Console.WriteLine($"│  stderr: {stderr}");
+                Console.WriteLine($"│  exit: {exitCode}");
+
+                finalMessages.Add(new OllamaChatMessage
+                {
+                    Role = "assistant",
+                    Content = rawResponse,
+                });
+                finalMessages.Add(new OllamaChatMessage
+                {
+                    Role = "user",
+                    Content = $"Command: {cmd.Command}\nExit code: {exitCode}\n"
+                             + $"stdout:\n{stdout}\n"
+                             + $"stderr:\n{stderr}",
+                });
+            }
+        }
+
+        if (!finalized)
+            Console.WriteLine("│  ⚠ Finalization max iterations reached.");
+
+        Console.WriteLine("└─────────────────────────────────────────");
     }
 
     /// <summary>
