@@ -92,6 +92,14 @@ public class AgentService
                     - A concise 2-5 word title (field: "title").
                     - An ordered list of steps (field: "steps"), each with a "stepNumber" (integer)
                       and a "description" (string). Keep the plan to 3-8 steps.
+
+                    IMPORTANT RULES:
+                    - The plan MUST always include one or more steps dedicated to actually creating,
+                      writing, coding, or producing the deliverable output (e.g. writing the full essay,
+                      generating the code files, compiling results). Research and outline steps alone
+                      are insufficient — the plan must produce a tangible file.
+                    - The LAST step must always be: save/write the complete deliverable to a file in
+                      the /workspace directory.
                     Respond with valid JSON only, matching the provided schema.
                     """,
             },
@@ -225,13 +233,20 @@ public class AgentService
             {
                 Role = "system",
                 Content = $$"""
-                    You are an AI agent executing a task inside a Docker sandbox (Ubuntu 24.04, with .NET 10 SDK, dotnet-ef, dotnet-aspnet-codegenerator, Node.js, npm, TypeScript, ts-node, Angular CLI, create-react-app, Vue CLI, Vite, Next.js, ESLint, Prettier, Python 3, SQLite 3, and nano pre-installed).
+                    You are an AI agent executing a task inside a Docker sandbox (Ubuntu 24.04, with .NET 10 SDK, dotnet-ef, dotnet-aspnet-codegenerator, Node.js, npm, TypeScript, ts-node, Angular CLI, create-react-app, Vue CLI, Vite, Next.js, ESLint, Prettier, Python 3, SQLite 3, wget, curl, and nano pre-installed).
                     The working directory is "{{SandboxWorkDir}}". ALL output and deliverables MUST be saved as files in that directory.
 
-                    IMPORTANT: If the task produces any textual output (reports, summaries, analysis, answers, code, etc.),
-                    you MUST write it to a file in {{SandboxWorkDir}}. Use markdown (.md) files for all text content.
-                    Format all text using proper markdown (headings, lists, code blocks, bold/italic, etc.).
-                    Never rely solely on stdout — always save results to files.
+                    IMPORTANT RULES:
+                    1. For web research, use `wget -qO- <url>` or `curl -s <url>` to fetch live content from
+                       the internet. Always fetch real URLs when researching facts, news, or current information.
+                    2. If the task produces any textual output (essays, reports, summaries, analysis, code, etc.),
+                       you MUST write the COMPLETE content to a file in {{SandboxWorkDir}}.
+                       Use markdown (.md) files for all text content with proper markdown formatting.
+                    3. When writing text content to a file, use a heredoc or `printf` — never use a short
+                       placeholder like `echo 'Title' > file.md`. The file must contain the full, final text.
+                    4. Never rely solely on stdout — always save results to files in {{SandboxWorkDir}}.
+                    5. Only set "done": true after the deliverable file(s) with complete content have been
+                       written to {{SandboxWorkDir}} and verified (e.g. with `ls -lh {{SandboxWorkDir}}`).
 
                     For each response, output ONLY valid JSON matching this structure:
                     {
