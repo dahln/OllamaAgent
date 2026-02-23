@@ -317,7 +317,19 @@ public class AgentService
                 break;
             }
 
-            if (!string.IsNullOrWhiteSpace(cmd.Command))
+            if (string.IsNullOrWhiteSpace(cmd.Command))
+            {
+                // AI said not done but gave no command — push feedback so it makes progress.
+                stepMessages.Add(new OllamaChatMessage { Role = "assistant", Content = rawResponse });
+                stepMessages.Add(new OllamaChatMessage
+                {
+                    Role = "user",
+                    Content = "You responded with done=false but did not provide a command. "
+                              + "Please run a shell command to make progress, or set done=true if the step is already complete.",
+                });
+                continue;
+            }
+            else
             {
                 Console.WriteLine($"│  $ {cmd.Command}");
                 stepOutput.AppendLine($"```shell");
@@ -476,12 +488,45 @@ public class AgentService
 
             if (cmd.Done)
             {
-                Console.WriteLine("│  ✓ Deliverables finalized.");
-                finalized = true;
-                break;
+                // Verify that the workspace actually contains substantial files before accepting.
+                var (verifyFiles, _, _) = await _docker.ExecuteCommandAsync(
+                    $"find {SandboxWorkDir} -maxdepth {MaxWorkspaceFindDepth} -type f -size +{MinimumDeliverableFileSizeBytes}c 2>/dev/null",
+                    cancellationToken: cancellationToken);
+
+                if (!string.IsNullOrWhiteSpace(verifyFiles))
+                {
+                    Console.WriteLine("│  ✓ Deliverables finalized.");
+                    finalized = true;
+                    break;
+                }
+
+                // AI claimed done but workspace is still empty — push feedback and keep iterating.
+                Console.WriteLine("│  ⚠ AI claimed done but workspace is still empty – prompting for content…");
+                finalMessages.Add(new OllamaChatMessage { Role = "assistant", Content = rawResponse });
+                finalMessages.Add(new OllamaChatMessage
+                {
+                    Role = "user",
+                    Content = $"You set done=true but the workspace is still empty. "
+                              + $"You MUST run a shell command (e.g. a heredoc) to write the COMPLETE content to {SandboxWorkDir}. "
+                              + $"Do NOT set done=true until the file is written and verified with `ls -lh {SandboxWorkDir}`.",
+                });
+                continue;
             }
 
-            if (!string.IsNullOrWhiteSpace(cmd.Command))
+            if (string.IsNullOrWhiteSpace(cmd.Command))
+            {
+                // AI said not done but gave no command — push feedback so it makes progress.
+                finalMessages.Add(new OllamaChatMessage { Role = "assistant", Content = rawResponse });
+                finalMessages.Add(new OllamaChatMessage
+                {
+                    Role = "user",
+                    Content = $"You responded with done=false but did not provide a command. "
+                              + $"Please run a shell command to write the complete deliverable to {SandboxWorkDir}, "
+                              + $"or set done=true only after the file is written and verified.",
+                });
+                continue;
+            }
+            else
             {
                 Console.WriteLine($"│  $ {cmd.Command}");
                 var (stdout, stderr, exitCode) = await _docker.ExecuteCommandAsync(
