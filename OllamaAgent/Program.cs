@@ -8,13 +8,17 @@ var ollamaUrl = Environment.GetEnvironmentVariable("OLLAMA_URL") ?? "http://loca
 // ── Banner ────────────────────────────────────────────────────────────────────
 Console.WriteLine();
 Console.WriteLine("╔══════════════════════════════════════════╗");
-Console.WriteLine("║          O l l a m a  A g e n t         ║");
+Console.WriteLine("║          O l l a m a  A g e n t          ║");
 Console.WriteLine("╚══════════════════════════════════════════╝");
 Console.WriteLine($"  Model : {ollamaModel}");
 Console.WriteLine($"  Ollama: {ollamaUrl}");
 Console.WriteLine();
 
-var ollama = new OllamaService(ollamaModel, ollamaUrl);
+using var log = new LoggingService();
+Console.WriteLine($"  Log   : {log.LogFilePath}");
+Console.WriteLine();
+
+var ollama = new OllamaService(ollamaModel, ollamaUrl, log);
 
 // Ensure the model is downloaded before accepting tasks.
 await ollama.EnsureModelPulledAsync();
@@ -23,7 +27,7 @@ await ollama.EnsureModelPulledAsync();
 // If the image is missing the application exits immediately with an error.
 try
 {
-    await DockerService.EnsureSandboxImageExistsAsync();
+    await DockerService.EnsureSandboxImageExistsAsync(log);
 }
 catch (Exception ex)
 {
@@ -60,12 +64,15 @@ while (true)
         cts.Cancel();
     };
 
-    await using var docker = new DockerService();
-    var agent = new AgentService(ollama, docker);
+    await using var docker = new DockerService(log);
+    var agent = new AgentService(ollama, docker, log);
 
     try
     {
+        log.LogTaskStart(userInput, ollamaModel, ollamaUrl);
         var outputPath = await agent.RunTaskAsync(userInput, cts.Token);
+
+        log.LogTaskEnd(outputPath, success: true);
 
         Console.WriteLine();
         Console.WriteLine("══════════════════════════════════════════");
@@ -75,10 +82,14 @@ while (true)
     }
     catch (OperationCanceledException)
     {
+        log.LogTaskEnd(null, success: false, "Task cancelled by user");
         Console.WriteLine("[Task cancelled.]");
     }
     catch (Exception ex)
     {
+        log.LogTaskEnd(null, success: false, ex.Message);
+        log.LogRuntimeError("RunTaskAsync", ex);
+
         Console.WriteLine();
         Console.ForegroundColor = ConsoleColor.Red;
         Console.WriteLine($"[Error] {ex.Message}");
@@ -87,4 +98,7 @@ while (true)
 
     Console.WriteLine();
 }
+
+log.WriteSessionSummary();
+Console.WriteLine($"Session log saved to: {log.LogFilePath}");
 

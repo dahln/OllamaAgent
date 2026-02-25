@@ -9,13 +9,15 @@ namespace OllamaAgent.Services;
 public class DockerService : IAsyncDisposable
 {
     private readonly DockerClient _client;
+    private readonly LoggingService? _log;
     private string? _containerId;
 
     private const string SandboxImage = "ghcr.io/dahln/lunasandbox:latest";
 
-    public DockerService()
+    public DockerService(LoggingService? log = null)
     {
         _client = new DockerClientConfiguration().CreateClient();
+        _log = log;
     }
 
     /// <summary>
@@ -23,7 +25,8 @@ public class DockerService : IAsyncDisposable
     /// whether the image is already available locally. Throws if neither succeeds so the
     /// caller can exit the process before accepting any tasks.
     /// </summary>
-    public static async Task EnsureSandboxImageExistsAsync(CancellationToken cancellationToken = default)
+    public static async Task EnsureSandboxImageExistsAsync(
+        LoggingService? log = null, CancellationToken cancellationToken = default)
     {
         using var client = new DockerClientConfiguration().CreateClient();
 
@@ -72,6 +75,7 @@ public class DockerService : IAsyncDisposable
                 cancellationToken);
 
             Console.WriteLine($"[Docker] Sandbox image ready: {SandboxImage}");
+            log?.LogDockerEvent("pull", $"Image pulled successfully: {SandboxImage}");
         }
         catch (Exception ex)
         {
@@ -86,6 +90,7 @@ public class DockerService : IAsyncDisposable
             }
             catch (Docker.DotNet.DockerImageNotFoundException)
             {
+                log?.LogDockerEvent("pull-failed", $"Image not available locally or remotely: {SandboxImage}");
                 throw new InvalidOperationException(
                     $"Sandbox image '{SandboxImage}' could not be pulled and is not available locally.\n" +
                     $"Pull error: {ex.Message}\n" +
@@ -118,6 +123,7 @@ public class DockerService : IAsyncDisposable
             _containerId, new ContainerStartParameters(), cancellationToken);
 
         Console.WriteLine($"[Docker] Sandbox ready (container: {_containerId[..12]})");
+        _log?.LogDockerEvent("start", $"Sandbox container started: {_containerId[..12]}");
     }
 
     /// <summary>
@@ -216,6 +222,7 @@ public class DockerService : IAsyncDisposable
             cancellationToken);
 
         Console.WriteLine("[Docker] Sandbox removed.");
+        _log?.LogDockerEvent("stop", $"Sandbox container removed: {_containerId[..12]}");
         _containerId = null;
     }
 

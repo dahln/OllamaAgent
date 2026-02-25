@@ -21,16 +21,18 @@ public class OllamaService
     private readonly HttpClient _httpClient;
     private readonly string _model;
     private readonly string _baseUrl;
+    private readonly LoggingService? _log;
 
     private static readonly JsonSerializerOptions _jsonOptions = new()
     {
         PropertyNameCaseInsensitive = true,
     };
 
-    public OllamaService(string model, string baseUrl = "http://localhost:11434")
+    public OllamaService(string model, string baseUrl = "http://localhost:11434", LoggingService? log = null)
     {
         _model = model;
         _baseUrl = baseUrl.TrimEnd('/');
+        _log = log;
         _httpClient = new HttpClient { Timeout = TimeSpan.FromMinutes(15) };
     }
 
@@ -55,16 +57,23 @@ public class OllamaService
 
         try
         {
+            var timer = System.Diagnostics.Stopwatch.StartNew();
             var rawResponse = await StreamChatAsync(
                 messages, format: PromptLibrary.Schemas.TaskClassification, cancellationToken: cancellationToken);
+            timer.Stop();
 
             var classification = JsonSerializer.Deserialize<TaskClassification>(rawResponse, _jsonOptions);
             if (classification is not null)
+            {
+                _log?.LogPromptCall("classification", "Classify user task",
+                    new[] { "Core.TaskClassification" }, rawResponse, timer.ElapsedMilliseconds, true);
                 return classification;
+            }
         }
         catch (Exception ex)
         {
             Console.WriteLine($"  Warning: Task classification failed ({ex.Message}), using defaults.");
+            _log?.LogAgenticError("Classification", $"Classification failed: {ex.Message}");
         }
 
         // Sensible fallback: coding/none

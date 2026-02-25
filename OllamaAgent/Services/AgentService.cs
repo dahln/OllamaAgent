@@ -16,6 +16,7 @@ public class AgentService
 {
     private readonly OllamaService _ollama;
     private readonly DockerService _docker;
+    private readonly LoggingService _log;
 
     private static readonly JsonSerializerOptions _jsonOptions = new()
     {
@@ -40,10 +41,11 @@ public class AgentService
     // Working directory inside the sandbox.
     private const string SandboxWorkDir = "/workspace";
 
-    public AgentService(OllamaService ollama, DockerService docker)
+    public AgentService(OllamaService ollama, DockerService docker, LoggingService log)
     {
         _ollama = ollama;
         _docker = docker;
+        _log = log;
     }
 
     /// <summary>
@@ -60,8 +62,12 @@ public class AgentService
         Console.WriteLine("══════════════════════════════════════════");
         Console.WriteLine();
 
+        var classifyTimer = System.Diagnostics.Stopwatch.StartNew();
         var classification = await _ollama.ClassifyTaskAsync(userPrompt, cancellationToken);
+        classifyTimer.Stop();
+
         Console.WriteLine($"  Classification: {classification}");
+        _log.LogClassification(classification, classifyTimer.ElapsedMilliseconds);
 
         // ── Phase 1b: Generate execution plan ────────────────────────────────
         Console.WriteLine();
@@ -72,8 +78,10 @@ public class AgentService
 
         var planMessages = _ollama.ComposePlanningMessages(userPrompt, classification);
 
+        var planTimer = System.Diagnostics.Stopwatch.StartNew();
         var planJson = await _ollama.StreamChatAsync(
             planMessages, format: PromptLibrary.Schemas.TaskPlan, cancellationToken: cancellationToken);
+        planTimer.Stop();
 
         TaskPlan? plan;
         try
@@ -82,12 +90,18 @@ public class AgentService
         }
         catch (JsonException ex)
         {
+            _log.LogAgenticError("PlanParsing", $"Failed to parse execution plan JSON: {ex.Message}");
             throw new InvalidOperationException(
                 $"Failed to parse execution plan from Ollama response.\nRaw: {planJson}", ex);
         }
 
         if (plan is null || string.IsNullOrWhiteSpace(plan.Title) || plan.Steps.Count == 0)
+        {
+            _log.LogAgenticError("PlanEmpty", "Ollama returned an empty execution plan.");
             throw new InvalidOperationException("Ollama returned an empty execution plan.");
+        }
+
+        _log.LogPlan(plan.Title, plan.Steps, planTimer.ElapsedMilliseconds);
 
         // Build a safe folder name: title + UTC timestamp (no spaces or invalid chars).
         var safeTitle = string.Concat(
@@ -198,6 +212,8 @@ public class AgentService
         Console.WriteLine($"┌─ Step {step.StepNumber}: {step.Description}");
         Console.WriteLine("│");
 
+        _log.LogStepStart(step.StepNumber, step.Description);
+
         var stepOutput = new StringBuilder();
         stepOutput.AppendLine($"## Step {step.StepNumber}: {step.Description}");
         stepOutput.AppendLine();
@@ -211,8 +227,9 @@ public class AgentService
             iteration: 1, maxIterations: MaxIterationsPerStep);
 
         bool stepDone = false;
+        int iteration = 0;
 
-        for (int iteration = 0; iteration < MaxIterationsPerStep; iteration++)
+        for (; iteration < MaxIterationsPerStep; iteration++)
         {
             Console.WriteLine($"│  [iteration {iteration + 1}]");
 
@@ -220,11 +237,14 @@ public class AgentService
             if (DetectLoop(recentCommands))
             {
                 Console.WriteLine("│  ⚠ Loop detected – injecting course correction…");
+                _log.LogLoopDetected(step.StepNumber, iteration + 1, recentCommands);
                 stepMessages.Add(_ollama.ComposeLoopBreaker(recentCommands, originalTask));
             }
 
+            var stepCallTimer = System.Diagnostics.Stopwatch.StartNew();
             var rawResponse = await _ollama.StreamChatAsync(
                 stepMessages, format: PromptLibrary.Schemas.StepCommand, cancellationToken: cancellationToken);
+            stepCallTimer.Stop();
 
             StepCommand? cmd;
             try
@@ -234,6 +254,7 @@ public class AgentService
             catch (JsonException)
             {
                 Console.WriteLine($"│  ⚠ Could not parse AI response as JSON – skipping iteration.");
+                _log.LogAgenticError("JsonParse", $"Step {step.StepNumber} iter {iteration + 1}: could not parse StepCommand JSON");
                 break;
             }
 
@@ -279,6 +300,8 @@ public class AgentService
                 var (stdout, stderr, exitCode) = await _docker.ExecuteCommandAsync(
                     cmd.Command, SandboxWorkDir, cancellationToken);
 
+                _log.LogSandboxCommand(step.StepNumber, iteration + 1, cmd.Command, stdout, stderr, exitCode);
+
                 if (!string.IsNullOrEmpty(stdout))
                 {
                     Console.WriteLine($"│  stdout: {stdout}");
@@ -305,7 +328,9 @@ public class AgentService
                             cancellationToken: cancellationToken);
                         var (_, aptErr, aptExit) = await _docker.ExecuteCommandAsync(
                             $"apt-get install -y {missingPackage} 2>&1", cancellationToken: cancellationToken);
-                        Console.WriteLine(aptExit == 0
+                        var installed = aptExit == 0;
+                        _log.LogMissingDependency(missingPackage, installed);
+                        Console.WriteLine(installed
                             ? $"│  ✓ Installed '{missingPackage}'."
                             : $"│  ✗ Could not install '{missingPackage}': {aptErr}");
                     }
@@ -331,7 +356,12 @@ public class AgentService
         }
 
         if (!stepDone)
+        {
             Console.WriteLine("│  ⚠ Max iterations reached – moving to next step.");
+            _log.LogAgenticError("MaxIterations", $"Step {step.StepNumber} hit iteration limit ({MaxIterationsPerStep})");
+        }
+
+        _log.LogStepEnd(step.StepNumber, stepDone, Math.Min(iteration + 1, MaxIterationsPerStep));
 
         Console.WriteLine("└─────────────────────────────────────────");
         return stepOutput.ToString();
@@ -368,6 +398,7 @@ public class AgentService
 
         Console.WriteLine($"  Workspace state:\n{lsOutput}");
         Console.WriteLine("  No substantial deliverable files found – running finalization.");
+        _log.LogFalseCompletion("post-execution", "Workspace empty after all steps completed");
 
         // Build research context from step outputs.
         var researchContext = new StringBuilder();
@@ -428,6 +459,7 @@ public class AgentService
 
                 // AI claimed done but workspace is still empty — push feedback and keep iterating.
                 Console.WriteLine("│  ⚠ AI claimed done but workspace is still empty – prompting for content…");
+                _log.LogFalseCompletion("finalization", $"AI claimed done at iteration {iteration + 1} but workspace is still empty");
                 finalMessages.Add(new OllamaChatMessage { Role = "assistant", Content = rawResponse });
                 finalMessages.Add(new OllamaChatMessage
                 {
@@ -480,7 +512,10 @@ public class AgentService
         }
 
         if (!finalized)
+        {
             Console.WriteLine("│  ⚠ Finalization max iterations reached.");
+            _log.LogAgenticError("FinalizationFailed", "Finalization loop exhausted without producing deliverables");
+        }
 
         Console.WriteLine("└─────────────────────────────────────────");
     }
