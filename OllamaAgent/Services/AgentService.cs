@@ -59,7 +59,8 @@ public class AgentService
     private const int MaxIterationsPerStep = 20;
 
     // Minimum file size (bytes) that counts as a non-trivial deliverable in the workspace.
-    private const int MinimumDeliverableFileSizeBytes = 500;
+    // Using 1 so that any non-empty file (including a small script like hello.py) is accepted.
+    private const int MinimumDeliverableFileSizeBytes = 1;
 
     // Maximum directory depth searched when looking for deliverable files.
     private const int MaxWorkspaceFindDepth = 5;
@@ -251,6 +252,13 @@ public class AgentService
                     You are an AI agent executing a task inside a Docker sandbox (Ubuntu 24.04, with .NET 10 SDK, dotnet-ef, dotnet-aspnet-codegenerator, Node.js, npm, TypeScript, ts-node, Angular CLI, create-react-app, Vue CLI, Vite, Next.js, ESLint, Prettier, Python 3, SQLite 3, wget, curl, and nano pre-installed).
                     The working directory is "{{SandboxWorkDir}}". ALL output and deliverables MUST be saved as files in that directory.
 
+                    ENVIRONMENT NOTES:
+                    - You are running as the root user. Do NOT use sudo — run apt-get, pip3, npm, etc. directly.
+                    - Both `python` and `python3` are available and refer to Python 3.
+                    - If a required tool or package is missing (e.g. "command not found"), install it immediately
+                      with `apt-get install -y <package>` (no sudo). Also append the package name to
+                      {{SandboxWorkDir}}/missing_deps.log so it can be added to the image later.
+
                     IMPORTANT RULES:
                     1. For web research, use `wget -qO- <url>` or `curl -s <url>` to fetch live content from
                        the internet. Always fetch real URLs when researching facts, news, or current information.
@@ -351,6 +359,23 @@ public class AgentService
                 stepOutput.AppendLine($"```");
                 stepOutput.AppendLine();
 
+                // Auto-install missing dependencies detected via "command not found".
+                if (exitCode != 0 && stderr.Contains("command not found", StringComparison.OrdinalIgnoreCase))
+                {
+                    var missingPackage = TryExtractMissingCommand(stderr);
+                    if (!string.IsNullOrWhiteSpace(missingPackage))
+                    {
+                        Console.WriteLine($"│  ⚠ Missing command '{missingPackage}' – attempting apt-get install…");
+                        var logCmd = $"echo '{missingPackage}' >> {SandboxWorkDir}/missing_deps.log";
+                        await _docker.ExecuteCommandAsync(logCmd, cancellationToken: cancellationToken);
+                        var (aptOut, aptErr, aptExit) = await _docker.ExecuteCommandAsync(
+                            $"apt-get install -y {missingPackage} 2>&1", cancellationToken: cancellationToken);
+                        Console.WriteLine(aptExit == 0
+                            ? $"│  ✓ Installed '{missingPackage}'."
+                            : $"│  ✗ Could not install '{missingPackage}': {aptErr}");
+                    }
+                }
+
                 // Feed the result back to the AI.
                 stepMessages.Add(new OllamaChatMessage
                 {
@@ -420,6 +445,11 @@ public class AgentService
                 Content = $$"""
                     You are an AI agent finalizing a task inside a Docker sandbox (Ubuntu 24.04).
                     The working directory is "{{SandboxWorkDir}}". ALL deliverables MUST be saved as files there.
+
+                    ENVIRONMENT NOTES:
+                    - You are running as the root user. Do NOT use sudo — run apt-get, pip3, npm, etc. directly.
+                    - Both `python` and `python3` are available and refer to Python 3.
+                    - If a required tool or package is missing, install it with `apt-get install -y <package>`.
 
                     The previous execution steps finished, but the workspace deliverable files are empty or missing.
                     Your job is to use the research and information gathered below to write COMPLETE, FULL deliverables.
@@ -621,5 +651,33 @@ public class AgentService
         }
 
         return result.ToString();
+    }
+
+    /// <summary>
+    /// Parses a "command not found" error message and returns the missing command name,
+    /// or null if the pattern is not recognized.
+    /// Example input: "/bin/bash: line 1: python: command not found"
+    /// Returns: "python"
+    /// </summary>
+    private static string? TryExtractMissingCommand(string stderr)
+    {
+        // Pattern: "...: <command>: command not found"
+        const string marker = ": command not found";
+        var idx = stderr.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+        if (idx < 0)
+            return null;
+
+        // Walk back to the preceding colon to extract the command token.
+        var before = stderr[..idx];
+        var lastColon = before.LastIndexOf(':');
+        if (lastColon < 0)
+            return null;
+
+        var command = before[(lastColon + 1)..].Trim();
+        // Reject empty strings or tokens with spaces/slashes (not a simple command name).
+        if (string.IsNullOrWhiteSpace(command) || command.Contains(' ') || command.Contains('/'))
+            return null;
+
+        return command;
     }
 }
