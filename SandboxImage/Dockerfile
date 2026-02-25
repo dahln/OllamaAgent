@@ -105,10 +105,11 @@ RUN npm install -g \
 # ── Layer 13: Frontend framework CLIs (npm global) ──────────────────────────
 # These are the largest npm packages — isolated so updates don't re-download
 # the TypeScript layer or linting layer.
+# NOTE: create-react-app is deprecated — use `npm create vite@latest -- --template react`.
+#       @vue/cli is deprecated (Vue 2 EOL) — use `npm create vue@latest` (create-vue).
 RUN npm install -g \
         @angular/cli \
-        create-react-app \
-        @vue/cli
+        create-vue
 
 # ── Layer 14: Build tools & dev servers (npm global) ────────────────────────
 RUN npm install -g \

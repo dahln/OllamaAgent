@@ -18,7 +18,7 @@ A multi-architecture Docker image (linux/amd64 + linux/arm64) used as the isolat
 | 10 | .NET 10 SDK | Installed via official Microsoft install script |
 | 11 | dotnet-ef, dotnet-aspnet-codegenerator | .NET global tools |
 | 12 | TypeScript, ts-node | TypeScript compiler & runner |
-| 13 | @angular/cli, create-react-app, @vue/cli | Frontend framework scaffolding CLIs |
+| 13 | @angular/cli, create-vue | Frontend framework scaffolding CLIs |
 | 14 | vite, next | Build tools & dev servers |
 | 15 | eslint, prettier | Linting & code formatting |
 | 16 | Django, Flask | Python web frameworks |

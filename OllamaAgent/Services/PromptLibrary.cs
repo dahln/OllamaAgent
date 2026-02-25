@@ -102,8 +102,10 @@ public static class PromptLibrary
             - Working directory: {workDir}
             - You are root. Do NOT use sudo — run commands directly.
             - Pre-installed tools: .NET 10 SDK (dotnet CLI), dotnet-ef, dotnet-aspnet-codegenerator,
-              Node.js, npm, TypeScript, ts-node, Angular CLI, create-react-app, Vue CLI, Vite,
+              Node.js, npm, TypeScript, ts-node, Angular CLI, create-vue, Vite,
               Next.js, ESLint, Prettier, Python 3, pip3, SQLite 3, wget, curl, nano.
+            - For React: use `npm create vite@latest -- --template react` (create-react-app is NOT available).
+            - For Vue: use `npm create vue@latest` (the create-vue package is pre-installed).
             - Both `python` and `python3` are available (Python 3).
             - If a required tool is genuinely missing (e.g. "command not found"), install it with
               `apt-get install -y <package>` and log it: `echo '<package>' >> {workDir}/missing_deps.log`.
@@ -211,8 +213,10 @@ public static class PromptLibrary
             - NEVER reference IDEs, Visual Studio, VS Code, or any graphical tool.
 
             ENVIRONMENT: CLI-only Docker sandbox (Ubuntu 24.04) with .NET 10 SDK, Node.js/npm,
-            Python 3, TypeScript, Angular CLI, React, Vue CLI, Vite, Next.js, SQLite 3,
+            Python 3, TypeScript, Angular CLI, create-vue, Vite, Next.js, SQLite 3,
             wget, curl, and common build utilities pre-installed.
+            For React: use `npm create vite@latest -- --template react`.
+            For Vue: use `npm create vue@latest`.
 
             Respond with valid JSON only.
             """;
@@ -305,7 +309,7 @@ public static class PromptLibrary
         /// <summary>Dispatcher: returns framework-specific guidance if applicable.</summary>
         public static string ForFramework(string? framework) => framework?.ToLowerInvariant() switch
         {
-            "react" => WebFrontend("React", "npx create-react-app my-app", "npm start"),
+            "react" => WebFrontend("React", "npm create vite@latest my-app -- --template react && cd my-app && npm install", "npm run dev"),
             "angular" => WebFrontend("Angular", "ng new my-app --defaults", "ng serve"),
             "vue" => WebFrontend("Vue", "npm create vue@latest my-app", "npm run dev"),
             "nextjs" => WebFrontend("Next.js", "npx create-next-app my-app", "npm run dev"),
