@@ -10,7 +10,7 @@ A multi-architecture Docker image (linux/amd64 + linux/arm64) used as the isolat
 | .NET 10 SDK | Installed via the official Microsoft install script |
 | dotnet-ef | Entity Framework Core global tool |
 | dotnet-aspnet-codegenerator | ASP.NET Core scaffolding global tool |
-| Node.js & npm | From Ubuntu's default package repository |
+| Node.js 22.x LTS & npm | Installed from NodeSource (Ubuntu's bundled v18 is too old for modern npm packages) |
 | TypeScript & ts-node | Global TypeScript compiler and runner |
 | @angular/cli | Angular project scaffolding |
 | create-react-app | React project scaffolding |
