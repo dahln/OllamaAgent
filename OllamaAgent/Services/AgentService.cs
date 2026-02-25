@@ -100,7 +100,20 @@ public class AgentService
                     - An ordered list of steps (field: "steps"), each with a "stepNumber" (integer)
                       and a "description" (string). Keep the plan to 3-8 steps.
 
+                    ENVIRONMENT CONSTRAINTS — the plan will execute inside a CLI-only Docker sandbox:
+                    - There is NO IDE, NO graphical interface, NO Visual Studio, NO VS Code.
+                      Every action must be performed via command-line tools only.
+                    - Pre-installed tools include: .NET 10 SDK (dotnet CLI), Node.js/npm, Python 3,
+                      TypeScript/ts-node, Angular CLI, React (create-react-app), Vue CLI, Vite,
+                      Next.js, ESLint, Prettier, SQLite 3, wget, curl, and common build utilities.
+                    - NEVER reference IDEs, Visual Studio, or any graphical tool in any step.
+
                     IMPORTANT RULES:
+                    - For any coding, development, or build task, the FIRST step MUST be an
+                      environment discovery step: probe the sandbox to verify installed tool
+                      versions and confirm the correct, latest CLI commands to use
+                      (e.g. `dotnet --version`, `node --version`, `python3 --version`).
+                      This ensures the agent always uses the currently-available, up-to-date tools.
                     - The plan MUST always include one or more steps dedicated to actually creating,
                       writing, coding, or producing the deliverable output (e.g. writing the full essay,
                       generating the code files, compiling results). Research and outline steps alone
@@ -153,7 +166,7 @@ public class AgentService
         await _docker.StartSandboxAsync(cancellationToken);
 
         // Create the workspace directory inside the sandbox.
-        await _docker.ExecuteCommandAsync($"mkdir -p {SandboxWorkDir}", cancellationToken: cancellationToken);
+        await RunInternalCommandAsync($"mkdir -p {SandboxWorkDir}", cancellationToken: cancellationToken);
 
         // ── Phase 3: Execute each step ────────────────────────────────────────
         Console.WriteLine();
@@ -255,9 +268,26 @@ public class AgentService
                     ENVIRONMENT NOTES:
                     - You are running as the root user. Do NOT use sudo — run apt-get, pip3, npm, etc. directly.
                     - Both `python` and `python3` are available and refer to Python 3.
+                    - There is NO IDE, NO Visual Studio, NO VS Code, and NO graphical interface of any kind.
+                      You MUST use command-line tools exclusively (dotnet CLI, npm, pip3, etc.).
                     - If a required tool or package is missing (e.g. "command not found"), install it immediately
                       with `apt-get install -y <package>` (no sudo). Also append the package name to
                       {{SandboxWorkDir}}/missing_deps.log so it can be added to the image later.
+
+                    WORKING DIRECTORY RULES:
+                    - When a tool creates a project in a subdirectory (e.g. `dotnet new` creates /workspace/HelloWorld),
+                      you MUST cd into that subdirectory before running build, run, test, or publish commands.
+                      Example: `cd /workspace/HelloWorld && dotnet build`
+                    - NEVER run `dotnet build`, `dotnet run`, `npm run build`, etc. from a directory that does not
+                      contain the project file. Always verify the current directory contains the relevant project
+                      file (*.csproj, package.json, etc.) before building.
+
+                    .NET SPECIFIC RULES:
+                    - Always use the `dotnet` CLI. NEVER attempt to install or use `msbuild` separately —
+                      MSBuild is already embedded in the .NET SDK and is invoked via `dotnet build`.
+                    - To build: `cd /workspace/<ProjectName> && dotnet build`
+                    - To run:   `cd /workspace/<ProjectName> && dotnet run`
+                    - To publish: `cd /workspace/<ProjectName> && dotnet publish -c Release -o /workspace/output`
 
                     IMPORTANT RULES:
                     1. For web research, use `wget -qO- <url>` or `curl -s <url>` to fetch live content from
@@ -412,11 +442,11 @@ public class AgentService
         CancellationToken cancellationToken)
     {
         // List workspace, noting any files larger than 500 bytes.
-        var (lsOutput, _, _) = await _docker.ExecuteCommandAsync(
+        var (lsOutput, _, _) = await RunInternalCommandAsync(
             $"ls -lhR {SandboxWorkDir} 2>/dev/null || echo 'workspace is empty'",
             cancellationToken: cancellationToken);
 
-        var (substantialFiles, _, _) = await _docker.ExecuteCommandAsync(
+        var (substantialFiles, _, _) = await RunInternalCommandAsync(
             $"find {SandboxWorkDir} -maxdepth {MaxWorkspaceFindDepth} -type f -size +{MinimumDeliverableFileSizeBytes}c 2>/dev/null",
             cancellationToken: cancellationToken);
 
@@ -519,7 +549,7 @@ public class AgentService
             if (cmd.Done)
             {
                 // Verify that the workspace actually contains substantial files before accepting.
-                var (verifyFiles, _, _) = await _docker.ExecuteCommandAsync(
+                var (verifyFiles, _, _) = await RunInternalCommandAsync(
                     $"find {SandboxWorkDir} -maxdepth {MaxWorkspaceFindDepth} -type f -size +{MinimumDeliverableFileSizeBytes}c 2>/dev/null",
                     cancellationToken: cancellationToken);
 
@@ -651,6 +681,17 @@ public class AgentService
         }
 
         return result.ToString();
+    }
+
+    /// <summary>
+    /// Executes a shell command in the sandbox, echoing the command to the console before
+    /// running it so that every sandbox invocation is visible in the output logs.
+    /// </summary>
+    private async Task<(string Output, string Error, long ExitCode)> RunInternalCommandAsync(
+        string command, string? workingDir = null, CancellationToken cancellationToken = default)
+    {
+        Console.WriteLine($"  $ {command}");
+        return await _docker.ExecuteCommandAsync(command, workingDir, cancellationToken);
     }
 
     /// <summary>
