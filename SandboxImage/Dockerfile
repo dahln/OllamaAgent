@@ -21,6 +21,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         wget \
     && rm -rf /var/lib/apt/lists/*
 
+# ── Upgrade Node.js to latest LTS ───────────────────────────────────────────
+# Ubuntu 24.04's apt repo ships Node.js 18.x, which is too old for many modern
+# npm packages (they require >=20 or >=22). The 'n' version manager uses the
+# existing npm to upgrade Node.js in-place without changing how it was installed.
+RUN npm install -g n && n lts && hash -r
+
 # ── .NET 10 SDK ──────────────────────────────────────────────────────────────
 # Microsoft's official install script handles both amd64 and arm64
 RUN curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh \
