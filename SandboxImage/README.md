@@ -4,23 +4,25 @@ A multi-architecture Docker image (linux/amd64 + linux/arm64) used as the isolat
 
 ## What's inside
 
-| Tool | Notes |
-|---|---|
-| Ubuntu 24.04 | Base OS |
-| .NET 10 SDK | Installed via the official Microsoft install script |
-| dotnet-ef | Entity Framework Core global tool |
-| dotnet-aspnet-codegenerator | ASP.NET Core scaffolding global tool |
-| Node.js LTS & npm | Installed via Ubuntu apt (v18), then upgraded to current LTS in-place using the `n` version manager |
-| TypeScript & ts-node | Global TypeScript compiler and runner |
-| @angular/cli | Angular project scaffolding |
-| create-react-app | React project scaffolding |
-| @vue/cli | Vue.js project scaffolding |
-| vite | Next-generation front-end build tool |
-| next | Next.js framework CLI |
-| eslint & prettier | Linting and code formatting |
-| Python 3 | Includes `pip` and `venv` |
-| SQLite 3 | For lightweight database operations |
-| nano | Text editor |
+| Layer | Tool(s) | Notes |
+|---|---|---|
+| 1 | Ubuntu 24.04, ca-certificates, curl, gnupg, wget | Core OS & HTTPS/download foundations |
+| 2 | build-essential, pkg-config | C/C++ compiler, make – needed for native npm/pip extensions |
+| 3 | Python 3, pip3, venv, pipx | Python runtime & package management |
+| 4 | Node.js, npm | Base Node.js from Ubuntu repos (upgraded in Layer 9) |
+| 5 | SQLite 3, libsqlite3-dev | Lightweight database with development headers |
+| 6 | git, jq, nano, tar, unzip, zip | CLI utilities, editors, archive tools |
+| 7 | iproute2, iputils-ping, netcat, dnsutils | Networking & sysadmin diagnostics |
+| 8 | shellcheck | Shell script linting |
+| 9 | Node.js LTS (via `n`) | Upgrades Node.js 18→LTS in-place |
+| 10 | .NET 10 SDK | Installed via official Microsoft install script |
+| 11 | dotnet-ef, dotnet-aspnet-codegenerator | .NET global tools |
+| 12 | TypeScript, ts-node | TypeScript compiler & runner |
+| 13 | @angular/cli, create-react-app, @vue/cli | Frontend framework scaffolding CLIs |
+| 14 | vite, next | Build tools & dev servers |
+| 15 | eslint, prettier | Linting & code formatting |
+| 16 | Django, Flask | Python web frameworks |
+| 17 | numpy, pandas, requests | Python data science & HTTP essentials |
 
 The default working directory inside the container is `/workspace`.
 

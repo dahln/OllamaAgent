@@ -36,10 +36,33 @@ public class DockerService : IAsyncDisposable
             var fromImage = lastColon >= 0 ? SandboxImage[..lastColon] : SandboxImage;
             var tag = lastColon >= 0 ? SandboxImage[(lastColon + 1)..] : "latest";
 
+            // Track per-layer progress to display Docker-style download output.
+            var layerProgress = new Dictionary<string, string>();
+
             var progress = new Progress<JSONMessage>(msg =>
             {
-                if (!string.IsNullOrEmpty(msg.Status))
+                // Docker emits progress updates per layer with an ID.
+                // Reconstruct the familiar pull output:
+                //   abc123def456: Downloading [=====>   ]  12.3MB/45.6MB
+                //   abc123def456: Pull complete
+
+                if (!string.IsNullOrEmpty(msg.ID))
+                {
+                    string line;
+                    var progressText = msg.Progress?.ToString();
+                    if (!string.IsNullOrEmpty(progressText))
+                        line = $"{msg.ID}: {msg.Status} {progressText}";
+                    else
+                        line = $"{msg.ID}: {msg.Status}";
+
+                    layerProgress[msg.ID] = line;
+                    Console.WriteLine($"[Docker] {line}");
+                }
+                else if (!string.IsNullOrEmpty(msg.Status))
+                {
+                    // Top-level status messages (e.g. "Pulling from ...", "Digest: ...", "Status: ...")
                     Console.WriteLine($"[Docker] {msg.Status}");
+                }
             });
 
             await client.Images.CreateImageAsync(

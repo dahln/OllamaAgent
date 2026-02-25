@@ -5,50 +5,17 @@ using OllamaAgent.Models;
 namespace OllamaAgent.Services;
 
 /// <summary>
-/// Orchestrates the full agentic flow: plan generation → sandbox creation → step execution
-/// → artifact collection → sandbox teardown.
+/// Orchestrates the full agentic flow: classification → plan generation → sandbox creation
+/// → step execution → artifact collection → sandbox teardown.
+///
+/// Design principle: This service handles loops, sub-loops, and lifecycle management.
+/// All intelligence — domain expertise, error recovery, scope control — lives in the
+/// PromptLibrary and is composed by OllamaService. Code here is minimal orchestration.
 /// </summary>
 public class AgentService
 {
     private readonly OllamaService _ollama;
     private readonly DockerService _docker;
-
-    // JSON schema objects used as the Ollama `format` parameter for structured output.
-    private static readonly object TaskPlanSchema = new
-    {
-        type = "object",
-        properties = new
-        {
-            title = new { type = "string", description = "A concise 2-5 word title for the task." },
-            steps = new
-            {
-                type = "array",
-                items = new
-                {
-                    type = "object",
-                    properties = new
-                    {
-                        stepNumber = new { type = "integer" },
-                        description = new { type = "string" },
-                    },
-                    required = new[] { "stepNumber", "description" },
-                },
-            },
-        },
-        required = new[] { "title", "steps" },
-    };
-
-    private static readonly object StepCommandSchema = new
-    {
-        type = "object",
-        properties = new
-        {
-            command = new { type = "string", description = "Shell command to execute in the sandbox. Empty string when done." },
-            done = new { type = "boolean", description = "True when this step is fully complete." },
-            message = new { type = "string", description = "Brief explanation of the action or result." },
-        },
-        required = new[] { "command", "done", "message" },
-    };
 
     private static readonly JsonSerializerOptions _jsonOptions = new()
     {
@@ -58,14 +25,19 @@ public class AgentService
     // Maximum command iterations per step before forcibly moving on.
     private const int MaxIterationsPerStep = 20;
 
-    // Minimum file size (bytes) that counts as a non-trivial deliverable in the workspace.
-    // Using 1 so that any non-empty file (including a small script like hello.py) is accepted.
+    // Number of recent commands to track for loop detection.
+    private const int CommandHistoryWindow = 6;
+
+    // How many times a command (or similar) can repeat before triggering loop-breaking.
+    private const int LoopThreshold = 2;
+
+    // Minimum file size (bytes) that counts as a non-trivial deliverable.
     private const int MinimumDeliverableFileSizeBytes = 1;
 
     // Maximum directory depth searched when looking for deliverable files.
     private const int MaxWorkspaceFindDepth = 5;
 
-    // Working directory inside the sandbox that will be copied to the host on completion.
+    // Working directory inside the sandbox.
     private const string SandboxWorkDir = "/workspace";
 
     public AgentService(OllamaService ollama, DockerService docker)
@@ -81,53 +53,27 @@ public class AgentService
     public async Task<string> RunTaskAsync(
         string userPrompt, CancellationToken cancellationToken = default)
     {
-        // ── Phase 1: Generate title + execution plan ─────────────────────────
+        // ── Phase 1a: Classify the task ──────────────────────────────────────
         Console.WriteLine();
         Console.WriteLine("══════════════════════════════════════════");
-        Console.WriteLine("  Phase 1 – Generating execution plan…");
+        Console.WriteLine("  Phase 1a – Classifying task…");
         Console.WriteLine("══════════════════════════════════════════");
         Console.WriteLine();
 
-        var planMessages = new List<OllamaChatMessage>
-        {
-            new()
-            {
-                Role = "system",
-                Content = """
-                    You are a task-planning AI. Given a user's task description, produce a structured
-                    execution plan with:
-                    - A concise 2-5 word title (field: "title").
-                    - An ordered list of steps (field: "steps"), each with a "stepNumber" (integer)
-                      and a "description" (string). Keep the plan to 3-8 steps.
+        var classification = await _ollama.ClassifyTaskAsync(userPrompt, cancellationToken);
+        Console.WriteLine($"  Classification: {classification}");
 
-                    ENVIRONMENT CONSTRAINTS — the plan will execute inside a CLI-only Docker sandbox:
-                    - There is NO IDE, NO graphical interface, NO Visual Studio, NO VS Code.
-                      Every action must be performed via command-line tools only.
-                    - Pre-installed tools include: .NET 10 SDK (dotnet CLI), Node.js/npm, Python 3,
-                      TypeScript/ts-node, Angular CLI, React (create-react-app), Vue CLI, Vite,
-                      Next.js, ESLint, Prettier, SQLite 3, wget, curl, and common build utilities.
-                    - NEVER reference IDEs, Visual Studio, or any graphical tool in any step.
+        // ── Phase 1b: Generate execution plan ────────────────────────────────
+        Console.WriteLine();
+        Console.WriteLine("══════════════════════════════════════════");
+        Console.WriteLine("  Phase 1b – Generating execution plan…");
+        Console.WriteLine("══════════════════════════════════════════");
+        Console.WriteLine();
 
-                    IMPORTANT RULES:
-                    - For any coding, development, or build task, the FIRST step MUST be an
-                      environment discovery step: probe the sandbox to verify installed tool
-                      versions and confirm the correct, latest CLI commands to use
-                      (e.g. `dotnet --version`, `node --version`, `python3 --version`).
-                      This ensures the agent always uses the currently-available, up-to-date tools.
-                    - The plan MUST always include one or more steps dedicated to actually creating,
-                      writing, coding, or producing the deliverable output (e.g. writing the full essay,
-                      generating the code files, compiling results). Research and outline steps alone
-                      are insufficient — the plan must produce a tangible file.
-                    - The LAST step must always be: save/write the complete deliverable to a file in
-                      the /workspace directory.
-                    Respond with valid JSON only, matching the provided schema.
-                    """,
-            },
-            new() { Role = "user", Content = userPrompt },
-        };
+        var planMessages = _ollama.ComposePlanningMessages(userPrompt, classification);
 
         var planJson = await _ollama.StreamChatAsync(
-            planMessages, format: TaskPlanSchema, cancellationToken: cancellationToken);
+            planMessages, format: PromptLibrary.Schemas.TaskPlan, cancellationToken: cancellationToken);
 
         TaskPlan? plan;
         try
@@ -177,7 +123,7 @@ public class AgentService
         var stepOutputs = new List<string>();
         foreach (var step in plan.Steps.OrderBy(s => s.StepNumber))
         {
-            var output = await ExecuteStepAsync(step, userPrompt, cancellationToken);
+            var output = await ExecuteStepAsync(step, userPrompt, classification, cancellationToken);
             stepOutputs.Add(output);
         }
 
@@ -188,7 +134,7 @@ public class AgentService
         Console.WriteLine("══════════════════════════════════════════");
         Console.WriteLine();
 
-        await FinalizeDeliverablesAsync(userPrompt, plan.Title, stepOutputs, cancellationToken);
+        await FinalizeDeliverablesAsync(userPrompt, plan.Title, stepOutputs, classification, cancellationToken);
 
         // ── Phase 4: Collect deliverables ─────────────────────────────────────
         Console.WriteLine();
@@ -245,78 +191,24 @@ public class AgentService
     // ─────────────────────────────────────────────────────────────────────────
 
     private async Task<string> ExecuteStepAsync(
-        ExecutionStep step, string originalTask, CancellationToken cancellationToken)
+        ExecutionStep step, string originalTask, TaskClassification classification,
+        CancellationToken cancellationToken)
     {
         Console.WriteLine();
         Console.WriteLine($"┌─ Step {step.StepNumber}: {step.Description}");
         Console.WriteLine("│");
 
-        // Accumulate text output from this step for use as a fallback if the workspace is empty.
         var stepOutput = new StringBuilder();
         stepOutput.AppendLine($"## Step {step.StepNumber}: {step.Description}");
         stepOutput.AppendLine();
 
-        var stepMessages = new List<OllamaChatMessage>
-        {
-            new()
-            {
-                Role = "system",
-                Content = $$"""
-                    You are an AI agent executing a task inside a Docker sandbox (Ubuntu 24.04, with .NET 10 SDK, dotnet-ef, dotnet-aspnet-codegenerator, Node.js, npm, TypeScript, ts-node, Angular CLI, create-react-app, Vue CLI, Vite, Next.js, ESLint, Prettier, Python 3, SQLite 3, wget, curl, and nano pre-installed).
-                    The working directory is "{{SandboxWorkDir}}". ALL output and deliverables MUST be saved as files in that directory.
+        // Track recent commands for loop detection.
+        var recentCommands = new List<string>();
 
-                    ENVIRONMENT NOTES:
-                    - You are running as the root user. Do NOT use sudo — run apt-get, pip3, npm, etc. directly.
-                    - Both `python` and `python3` are available and refer to Python 3.
-                    - There is NO IDE, NO Visual Studio, NO VS Code, and NO graphical interface of any kind.
-                      You MUST use command-line tools exclusively (dotnet CLI, npm, pip3, etc.).
-                    - If a required tool or package is missing (e.g. "command not found"), install it immediately
-                      with `apt-get install -y <package>` (no sudo). Also append the package name to
-                      {{SandboxWorkDir}}/missing_deps.log so it can be added to the image later.
-
-                    WORKING DIRECTORY RULES:
-                    - When a tool creates a project in a subdirectory (e.g. `dotnet new` creates /workspace/HelloWorld),
-                      you MUST cd into that subdirectory before running build, run, test, or publish commands.
-                      Example: `cd /workspace/HelloWorld && dotnet build`
-                    - NEVER run `dotnet build`, `dotnet run`, `npm run build`, etc. from a directory that does not
-                      contain the project file. Always verify the current directory contains the relevant project
-                      file (*.csproj, package.json, etc.) before building.
-
-                    .NET SPECIFIC RULES:
-                    - Always use the `dotnet` CLI. NEVER attempt to install or use `msbuild` separately —
-                      MSBuild is already embedded in the .NET SDK and is invoked via `dotnet build`.
-                    - To build: `cd /workspace/<ProjectName> && dotnet build`
-                    - To run:   `cd /workspace/<ProjectName> && dotnet run`
-                    - To publish: `cd /workspace/<ProjectName> && dotnet publish -c Release -o /workspace/output`
-
-                    IMPORTANT RULES:
-                    1. For web research, use `wget -qO- <url>` or `curl -s <url>` to fetch live content from
-                       the internet. Always fetch real URLs when researching facts, news, or current information.
-                    2. If the task produces any textual output (essays, reports, summaries, analysis, code, etc.),
-                       you MUST write the COMPLETE content to a file in {{SandboxWorkDir}}.
-                       Use markdown (.md) files for all text content with proper markdown formatting.
-                    3. When writing text content to a file, use a heredoc or `printf` — never use a short
-                       placeholder like `echo 'Title' > file.md`. The file must contain the full, final text.
-                    4. Never rely solely on stdout — always save results to files in {{SandboxWorkDir}}.
-                    5. Only set "done": true after the deliverable file(s) with complete content have been
-                       written to {{SandboxWorkDir}} and verified (e.g. with `ls -lh {{SandboxWorkDir}}`).
-
-                    For each response, output ONLY valid JSON matching this structure:
-                    {
-                      "command": "<shell command to run, or empty string if this step is done>",
-                      "done": <true when step is complete, false otherwise>,
-                      "message": "<brief explanation of what you are doing or what was accomplished>"
-                    }
-
-                    Original task: {{originalTask}}
-                    """,
-            },
-            new()
-            {
-                Role = "user",
-                Content = $"Execute step {step.StepNumber}: {step.Description}",
-            },
-        };
+        // Compose initial messages using classification-driven prompt selection.
+        var stepMessages = _ollama.ComposeStepExecutionMessages(
+            step, originalTask, classification, SandboxWorkDir,
+            iteration: 1, maxIterations: MaxIterationsPerStep);
 
         bool stepDone = false;
 
@@ -324,8 +216,15 @@ public class AgentService
         {
             Console.WriteLine($"│  [iteration {iteration + 1}]");
 
+            // ── Loop detection: check for repeating command patterns ──
+            if (DetectLoop(recentCommands))
+            {
+                Console.WriteLine("│  ⚠ Loop detected – injecting course correction…");
+                stepMessages.Add(_ollama.ComposeLoopBreaker(recentCommands, originalTask));
+            }
+
             var rawResponse = await _ollama.StreamChatAsync(
-                stepMessages, format: StepCommandSchema, cancellationToken: cancellationToken);
+                stepMessages, format: PromptLibrary.Schemas.StepCommand, cancellationToken: cancellationToken);
 
             StepCommand? cmd;
             try
@@ -357,7 +256,6 @@ public class AgentService
 
             if (string.IsNullOrWhiteSpace(cmd.Command))
             {
-                // AI said not done but gave no command — push feedback so it makes progress.
                 stepMessages.Add(new OllamaChatMessage { Role = "assistant", Content = rawResponse });
                 stepMessages.Add(new OllamaChatMessage
                 {
@@ -370,8 +268,14 @@ public class AgentService
             else
             {
                 Console.WriteLine($"│  $ {cmd.Command}");
-                stepOutput.AppendLine($"```shell");
+                stepOutput.AppendLine("```shell");
                 stepOutput.AppendLine($"$ {cmd.Command}");
+
+                // Track command for loop detection.
+                recentCommands.Add(cmd.Command);
+                if (recentCommands.Count > CommandHistoryWindow)
+                    recentCommands.RemoveAt(0);
+
                 var (stdout, stderr, exitCode) = await _docker.ExecuteCommandAsync(
                     cmd.Command, SandboxWorkDir, cancellationToken);
 
@@ -386,19 +290,20 @@ public class AgentService
                     stepOutput.AppendLine($"stderr: {stderr}");
                 }
                 Console.WriteLine($"│  exit: {exitCode}");
-                stepOutput.AppendLine($"```");
+                stepOutput.AppendLine("```");
                 stepOutput.AppendLine();
 
-                // Auto-install missing dependencies detected via "command not found".
+                // Auto-install missing commands (lightweight code guard).
                 if (exitCode != 0 && stderr.Contains("command not found", StringComparison.OrdinalIgnoreCase))
                 {
                     var missingPackage = TryExtractMissingCommand(stderr);
                     if (!string.IsNullOrWhiteSpace(missingPackage))
                     {
                         Console.WriteLine($"│  ⚠ Missing command '{missingPackage}' – attempting apt-get install…");
-                        var logCmd = $"echo '{missingPackage}' >> {SandboxWorkDir}/missing_deps.log";
-                        await _docker.ExecuteCommandAsync(logCmd, cancellationToken: cancellationToken);
-                        var (aptOut, aptErr, aptExit) = await _docker.ExecuteCommandAsync(
+                        await _docker.ExecuteCommandAsync(
+                            $"echo '{missingPackage}' >> {SandboxWorkDir}/missing_deps.log",
+                            cancellationToken: cancellationToken);
+                        var (_, aptErr, aptExit) = await _docker.ExecuteCommandAsync(
                             $"apt-get install -y {missingPackage} 2>&1", cancellationToken: cancellationToken);
                         Console.WriteLine(aptExit == 0
                             ? $"│  ✓ Installed '{missingPackage}'."
@@ -406,19 +311,22 @@ public class AgentService
                     }
                 }
 
-                // Feed the result back to the AI.
-                stepMessages.Add(new OllamaChatMessage
+                // Feed the result back — with structured error guidance on failure.
+                stepMessages.Add(new OllamaChatMessage { Role = "assistant", Content = rawResponse });
+
+                if (exitCode != 0)
                 {
-                    Role = "assistant",
-                    Content = rawResponse,
-                });
-                stepMessages.Add(new OllamaChatMessage
+                    // Provide AI-driven error recovery guidance via prompt.
+                    stepMessages.Add(_ollama.ComposeErrorGuidance(cmd.Command, stderr, exitCode));
+                }
+                else
                 {
-                    Role = "user",
-                    Content = $"Command: {cmd.Command}\nExit code: {exitCode}\n"
-                              + $"stdout:\n{stdout}\n"
-                              + $"stderr:\n{stderr}",
-                });
+                    stepMessages.Add(new OllamaChatMessage
+                    {
+                        Role = "user",
+                        Content = $"Command: {cmd.Command}\nExit code: {exitCode}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+                    });
+                }
             }
         }
 
@@ -439,9 +347,10 @@ public class AgentService
         string originalTask,
         string taskTitle,
         IReadOnlyList<string> stepOutputs,
+        TaskClassification classification,
         CancellationToken cancellationToken)
     {
-        // List workspace, noting any files larger than 500 bytes.
+        // List workspace, noting any files larger than minimum size.
         var (lsOutput, _, _) = await RunInternalCommandAsync(
             $"ls -lhR {SandboxWorkDir} 2>/dev/null || echo 'workspace is empty'",
             cancellationToken: cancellationToken);
@@ -460,60 +369,17 @@ public class AgentService
         Console.WriteLine($"  Workspace state:\n{lsOutput}");
         Console.WriteLine("  No substantial deliverable files found – running finalization.");
 
-        // Build a context string from the gathered research / step outputs.
+        // Build research context from step outputs.
         var researchContext = new StringBuilder();
         researchContext.AppendLine("## Research and Work Completed So Far");
         researchContext.AppendLine();
         foreach (var output in stepOutputs)
             researchContext.AppendLine(output);
 
-        var finalMessages = new List<OllamaChatMessage>
-        {
-            new()
-            {
-                Role = "system",
-                Content = $$"""
-                    You are an AI agent finalizing a task inside a Docker sandbox (Ubuntu 24.04).
-                    The working directory is "{{SandboxWorkDir}}". ALL deliverables MUST be saved as files there.
-
-                    ENVIRONMENT NOTES:
-                    - You are running as the root user. Do NOT use sudo — run apt-get, pip3, npm, etc. directly.
-                    - Both `python` and `python3` are available and refer to Python 3.
-                    - If a required tool or package is missing, install it with `apt-get install -y <package>`.
-
-                    The previous execution steps finished, but the workspace deliverable files are empty or missing.
-                    Your job is to use the research and information gathered below to write COMPLETE, FULL deliverables.
-
-                    CRITICAL RULES:
-                    1. Write the COMPLETE, FULL content to files in {{SandboxWorkDir}}.
-                       Do NOT write stubs, placeholders, or headers only.
-                    2. Use a heredoc to write full content, for example:
-                         cat > {{SandboxWorkDir}}/output.md << 'HEREDOC'
-                         [full content here]
-                         HEREDOC
-                    3. After writing, verify with `ls -lh {{SandboxWorkDir}}` that the file is non-empty.
-                    4. Only set "done": true after deliverable files with COMPLETE content are confirmed.
-
-                    For each response, output ONLY valid JSON:
-                    {
-                      "command": "<shell command to run, or empty string if done>",
-                      "done": <true when deliverables are written and verified, false otherwise>,
-                      "message": "<brief explanation>"
-                    }
-
-                    Original task: {{originalTask}}
-                    Task title: {{taskTitle}}
-                    """,
-            },
-            new()
-            {
-                Role = "user",
-                Content = $"The workspace deliverable files are empty or missing.\n"
-                         + $"Current workspace state:\n{lsOutput}\n\n"
-                         + $"Use the following research and work to write the complete deliverables:\n\n"
-                         + researchContext.ToString(),
-            },
-        };
+        // Compose finalization messages using classification-driven prompts.
+        var finalMessages = _ollama.ComposeFinalizationMessages(
+            originalTask, taskTitle, classification, SandboxWorkDir,
+            lsOutput, researchContext.ToString());
 
         Console.WriteLine();
         Console.WriteLine("┌─ Finalization step");
@@ -525,7 +391,7 @@ public class AgentService
             Console.WriteLine($"│  [finalization iteration {iteration + 1}]");
 
             var rawResponse = await _ollama.StreamChatAsync(
-                finalMessages, format: StepCommandSchema, cancellationToken: cancellationToken);
+                finalMessages, format: PromptLibrary.Schemas.StepCommand, cancellationToken: cancellationToken);
 
             StepCommand? cmd;
             try
@@ -682,6 +548,28 @@ public class AgentService
 
         return result.ToString();
     }
+
+    /// <summary>
+    /// Detects whether the recent command history contains a repeating pattern,
+    /// indicating the AI is stuck in a loop retrying the same failing approach.
+    /// </summary>
+    private static bool DetectLoop(IReadOnlyList<string> recentCommands)
+    {
+        if (recentCommands.Count < 3)
+            return false;
+
+        // Check if any command appears LoopThreshold+ times in the history window.
+        return recentCommands
+            .GroupBy(c => NormalizeCommand(c), StringComparer.OrdinalIgnoreCase)
+            .Any(g => g.Count() >= LoopThreshold);
+    }
+
+    /// <summary>
+    /// Normalizes a command for comparison by stripping version numbers and whitespace
+    /// so that variants like "pip3 install dotnet" and "pip3  install dotnet" match.
+    /// </summary>
+    private static string NormalizeCommand(string command) =>
+        System.Text.RegularExpressions.Regex.Replace(command.Trim(), @"\s+", " ");
 
     /// <summary>
     /// Executes a shell command in the sandbox, echoing the command to the console before

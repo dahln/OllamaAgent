@@ -5,8 +5,16 @@ using OllamaAgent.Models;
 namespace OllamaAgent.Services;
 
 /// <summary>
-/// Communicates with a local Ollama instance, streaming token output to the console
-/// and returning the full accumulated response text.
+/// The AI brain of the agent. Communicates with a local Ollama instance and manages
+/// a comprehensive prompt library to drive all agent behavior.
+///
+/// Responsibilities:
+/// 1. HTTP communication with Ollama (streaming chat, model management).
+/// 2. Task classification — analyzes user prompts to determine domain, language, and complexity.
+/// 3. Prompt composition — selects and combines prompts from PromptLibrary based on classification.
+///
+/// Design principle: Coding logic is minimal. AI prompts do the work.
+/// This service composes the right prompts and lets the LLM make all domain decisions.
 /// </summary>
 public class OllamaService
 {
@@ -24,6 +32,152 @@ public class OllamaService
         _model = model;
         _baseUrl = baseUrl.TrimEnd('/');
         _httpClient = new HttpClient { Timeout = TimeSpan.FromMinutes(15) };
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  TASK CLASSIFICATION — Uses AI to determine the right prompts to use
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Analyzes the user's prompt using AI to classify the task into a category, language,
+    /// framework, required capabilities, and complexity level. The classification drives
+    /// which prompts from the PromptLibrary are selected for each execution phase.
+    /// Falls back to sensible defaults if the AI response cannot be parsed.
+    /// </summary>
+    public async Task<TaskClassification> ClassifyTaskAsync(
+        string userPrompt, CancellationToken cancellationToken = default)
+    {
+        var messages = new List<OllamaChatMessage>
+        {
+            new() { Role = "system", Content = PromptLibrary.Core.TaskClassification() },
+            new() { Role = "user", Content = userPrompt },
+        };
+
+        try
+        {
+            var rawResponse = await StreamChatAsync(
+                messages, format: PromptLibrary.Schemas.TaskClassification, cancellationToken: cancellationToken);
+
+            var classification = JsonSerializer.Deserialize<TaskClassification>(rawResponse, _jsonOptions);
+            if (classification is not null)
+                return classification;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  Warning: Task classification failed ({ex.Message}), using defaults.");
+        }
+
+        // Sensible fallback: coding/none
+        return new TaskClassification
+        {
+            PrimaryCategory = "coding",
+            Language = "none",
+            Framework = "none",
+            RequiredCapabilities = new List<string> { "file_writing" },
+            Complexity = "moderate",
+        };
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  PROMPT COMPOSITION — Selects and combines prompts for each phase
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Composes the initial messages for the planning phase, selecting appropriate prompts
+    /// based on the task classification.
+    /// </summary>
+    public List<OllamaChatMessage> ComposePlanningMessages(
+        string userPrompt, TaskClassification classification)
+    {
+        return new List<OllamaChatMessage>
+        {
+            new()
+            {
+                Role = "system",
+                Content = PromptLibrary.ComposePlanningSystemPrompt(classification),
+            },
+            new() { Role = "user", Content = userPrompt },
+        };
+    }
+
+    /// <summary>
+    /// Composes the initial messages for a step execution iteration, combining domain-specific
+    /// coding/writing guidance, guard prompts, and iteration awareness based on the classification.
+    /// </summary>
+    public List<OllamaChatMessage> ComposeStepExecutionMessages(
+        ExecutionStep step,
+        string originalTask,
+        TaskClassification classification,
+        string workDir,
+        int iteration,
+        int maxIterations,
+        IReadOnlyList<string>? recentCommands = null)
+    {
+        string systemPrompt = PromptLibrary.ComposeExecutionSystemPrompt(
+            workDir, originalTask, classification, iteration, maxIterations, recentCommands);
+
+        return new List<OllamaChatMessage>
+        {
+            new() { Role = "system", Content = systemPrompt },
+            new() { Role = "user", Content = $"Execute step {step.StepNumber}: {step.Description}" },
+        };
+    }
+
+    /// <summary>
+    /// Composes the initial messages for the finalization phase when deliverables are missing.
+    /// </summary>
+    public List<OllamaChatMessage> ComposeFinalizationMessages(
+        string originalTask,
+        string taskTitle,
+        TaskClassification classification,
+        string workDir,
+        string workspaceState,
+        string researchContext)
+    {
+        string systemPrompt = PromptLibrary.ComposeFinalizationSystemPrompt(
+            workDir, originalTask, taskTitle, classification);
+
+        return new List<OllamaChatMessage>
+        {
+            new() { Role = "system", Content = systemPrompt },
+            new()
+            {
+                Role = "user",
+                Content = $"The workspace deliverable files are empty or missing.\n"
+                         + $"Current workspace state:\n{workspaceState}\n\n"
+                         + $"Use the following research and work to write the complete deliverables:\n\n"
+                         + researchContext,
+            },
+        };
+    }
+
+    /// <summary>
+    /// Composes a user-role message to inject into conversation when a command loop is detected.
+    /// This allows the orchestrator to break infinite loops by giving the AI explicit guidance.
+    /// </summary>
+    public OllamaChatMessage ComposeLoopBreaker(
+        IReadOnlyList<string> recentCommands, string originalTask)
+    {
+        return new OllamaChatMessage
+        {
+            Role = "user",
+            Content = PromptLibrary.Guards.LoopDetection(recentCommands)
+                    + $"\n\nRemember, the original task is: {originalTask}\n"
+                    + "Focus on producing the deliverable. Skip anything that isn't working.",
+        };
+    }
+
+    /// <summary>
+    /// Composes a user-role message providing structured error recovery guidance
+    /// after a command failure.
+    /// </summary>
+    public OllamaChatMessage ComposeErrorGuidance(string command, string error, long exitCode)
+    {
+        return new OllamaChatMessage
+        {
+            Role = "user",
+            Content = PromptLibrary.ErrorRecovery.CommandFailed(command, error, exitCode),
+        };
     }
 
     /// <summary>
