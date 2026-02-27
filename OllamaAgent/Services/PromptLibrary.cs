@@ -201,6 +201,8 @@ public static class PromptLibrary
             PLAN REQUIREMENTS:
             - Create a concise 2-5 word title (field: "title").
             - Create an ordered list of 3-8 steps (field: "steps"), each with "stepNumber" and "description".
+                        - Include an early step that establishes immutable execution variables
+                            (e.g. PROJECT_NAME, ROOT_DIR, OUTPUT_FILE) that all later steps must reuse exactly.
             - The FIRST step MUST be environment discovery: verify installed tool versions
               and confirm available CLI commands (e.g. `dotnet --version`, `node --version`).
             - The plan MUST include steps that actually CREATE the deliverable
@@ -211,6 +213,8 @@ public static class PromptLibrary
             - Do NOT include steps for installing tools that are already pre-installed.
             - Do NOT add unnecessary enterprise patterns (DI, hosting, ORM) for simple tasks.
             - NEVER reference IDEs, Visual Studio, VS Code, or any graphical tool.
+                        - Include a final validation step that checks for unresolved placeholders/tokens
+                            such as ProjectName, TODO_PROJECT, __PROJECT__, or <project-name> before completion.
 
             ENVIRONMENT: CLI-only Docker sandbox (Ubuntu 24.04) with .NET 10 SDK, Node.js/npm,
             Python 3, TypeScript, Angular CLI, create-vue, Vite, Next.js, SQLite 3,
@@ -242,6 +246,13 @@ public static class PromptLibrary
             5. Only set "done": true after the deliverable is written AND verified.
             6. After creating files, always verify with `cat` or `ls -lh` that content is correct.
             7. If writing code, ALWAYS build/compile and run to verify correctness before marking done.
+                8. NEVER use unresolved template tokens in commands or file content:
+                    `ProjectName`, `TODO_PROJECT`, `__PROJECT__`, `<project-name>`, `<name>`.
+                9. Before each write/build command, run a preflight check:
+                    - confirm exact target path exists
+                    - confirm names are concrete and match prior created paths
+                    - confirm no unresolved placeholders remain.
+                10. If you hit the same category of failure twice, STOP that approach and pivot.
             """;
 
         public static string Finalization(string workDir, string originalTask, string taskTitle) => $$"""
@@ -342,10 +353,12 @@ public static class PromptLibrary
 
             C# / .NET DEVELOPMENT RULES:
             - Use ONLY the `dotnet` CLI for ALL .NET operations.
-            - Create projects: `dotnet new console -n ProjectName` (or webapi, classlib, etc.)
-            - Build: `cd /workspace/ProjectName && dotnet build`
-            - Run: `cd /workspace/ProjectName && dotnet run`
-            - Publish: `cd /workspace/ProjectName && dotnet publish -c Release -o /workspace/output`
+            - Choose a concrete project name once (e.g. `MyApp`) and reuse it exactly.
+            - NEVER use the literal token `ProjectName` in commands.
+            - Create projects: `dotnet new console -n MyApp` (or webapi, classlib, etc.)
+            - Build: `cd /workspace/MyApp && dotnet build`
+            - Run: `cd /workspace/MyApp && dotnet run`
+            - Publish: `cd /workspace/MyApp && dotnet publish -c Release -o /workspace/output`
             - MSBuild is embedded in the SDK — NEVER install or invoke `msbuild` separately.
 
             CRITICAL C# ANTI-PATTERNS TO AVOID:
@@ -360,7 +373,7 @@ public static class PromptLibrary
             1. After `dotnet new console`, the template Program.cs contains only "Hello World".
                You MUST overwrite it with actual task code.
             2. To write Program.cs content, use a heredoc:
-                 cat > /workspace/ProjectName/Program.cs << 'CSHARPEOF'
+                      cat > /workspace/MyApp/Program.cs << 'CSHARPEOF'
                  using System;
                  using System.Collections.Generic;
                  using System.Linq;
@@ -580,6 +593,8 @@ public static class PromptLibrary
             - Write all output to files in /workspace.
             - Use markdown formatting for text-based deliverables.
             - Verify output files are non-empty and contain complete content.
+                        - Never leave unresolved placeholder tokens in deliverables
+                            (ProjectName, TODO_PROJECT, __PROJECT__, <project-name>, <name>).
             """;
     }
 
@@ -589,6 +604,27 @@ public static class PromptLibrary
 
     public static class Guards
     {
+        public static string IdentityAndPlaceholderGuard(string workDir, string originalTask) => $"""
+
+            ═══ IDENTITY & PLACEHOLDER GUARD ═══
+            TASK: {originalTask}
+            ROOT_DIR: {workDir}
+
+            IMMUTABLE CONTEXT CONTRACT:
+            - Derive concrete names once and reuse them exactly across all commands/files.
+            - Do NOT invent or substitute names mid-task.
+            - If the task includes a project/app name, treat that exact string as immutable.
+
+            PLACEHOLDER PREVENTION:
+            - NEVER emit unresolved tokens: ProjectName, TODO_PROJECT, __PROJECT__, <project-name>, <name>.
+            - If a command or file would include any placeholder token, STOP and correct first.
+
+            PRE-ACTION CHECK (must pass before writes/builds/runs):
+            1. Paths exist and are under {workDir}
+            2. Names are concrete (no placeholders)
+            3. Action advances the deliverable directly
+            """;
+
         public static string ScopeGuard(string originalTask, string? language) => $"""
 
             ═══ SCOPE GUARD ═══
@@ -877,6 +913,7 @@ public static class PromptLibrary
         }
 
         // Guard prompts
+        parts.Add(Guards.IdentityAndPlaceholderGuard(workDir, originalTask));
         parts.Add(Guards.ScopeGuard(originalTask, classification.Language));
 
         string toolConstraint = Guards.ToolConstraint(classification.Language);
@@ -926,6 +963,7 @@ public static class PromptLibrary
             Core.Finalization(workDir, originalTask, taskTitle),
             Modifiers.SandboxEnvironment(workDir),
             Modifiers.FileWritingRules(workDir),
+            Guards.IdentityAndPlaceholderGuard(workDir, originalTask),
         };
 
         bool isCoding = classification.PrimaryCategory.Equals("coding", StringComparison.OrdinalIgnoreCase);

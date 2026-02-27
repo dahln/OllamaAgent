@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using OllamaAgent.Models;
 
 namespace OllamaAgent.Services;
@@ -32,6 +33,12 @@ public class AgentService
     // How many times a command (or similar) can repeat before triggering loop-breaking.
     private const int LoopThreshold = 2;
 
+    // Max times the same normalized failing command can be attempted before hard block.
+    private const int MaxSameCommandFailures = 2;
+
+    // Max placeholder violations allowed in a step before forcing progression.
+    private const int MaxPlaceholderViolationsPerStep = 2;
+
     // Minimum file size (bytes) that counts as a non-trivial deliverable.
     private const int MinimumDeliverableFileSizeBytes = 1;
 
@@ -40,6 +47,16 @@ public class AgentService
 
     // Working directory inside the sandbox.
     private const string SandboxWorkDir = "/workspace";
+
+    private static readonly string[] PlaceholderTokens =
+    {
+        "ProjectName",
+        "TODO_PROJECT",
+        "__PROJECT__",
+        "<project-name>",
+        "<project_name>",
+        "<name>",
+    };
 
     public AgentService(OllamaService ollama, DockerService docker, LoggingService log)
     {
@@ -220,6 +237,9 @@ public class AgentService
 
         // Track recent commands for loop detection.
         var recentCommands = new List<string>();
+        var failedCommandCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var blockedCommands = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        int placeholderViolations = 0;
 
         // Compose initial messages using classification-driven prompt selection.
         var stepMessages = _ollama.ComposeStepExecutionMessages(
@@ -288,6 +308,49 @@ public class AgentService
             }
             else
             {
+                if (ContainsPlaceholderToken(cmd.Command))
+                {
+                    placeholderViolations++;
+                    Console.WriteLine("│  ⚠ Blocked command with unresolved placeholder token.");
+                    _log.LogAgenticError(
+                        "PlaceholderCommand",
+                        $"Step {step.StepNumber} iter {iteration + 1}: blocked placeholder command '{cmd.Command}'");
+
+                    stepMessages.Add(new OllamaChatMessage { Role = "assistant", Content = rawResponse });
+                    stepMessages.Add(new OllamaChatMessage
+                    {
+                        Role = "user",
+                        Content = "Your command includes unresolved placeholder tokens (e.g. ProjectName). "
+                                  + "Use concrete names from the current workspace. Run `ls -la /workspace` "
+                                  + "to discover actual directories and then use those exact names.",
+                    });
+
+                    if (placeholderViolations >= MaxPlaceholderViolationsPerStep)
+                    {
+                        Console.WriteLine("│  ⚠ Too many placeholder violations – moving to next step.");
+                        _log.LogAgenticError(
+                            "PlaceholderLoop",
+                            $"Step {step.StepNumber} hit placeholder violation limit ({MaxPlaceholderViolationsPerStep})");
+                        break;
+                    }
+
+                    continue;
+                }
+
+                var normalizedCandidate = NormalizeCommand(cmd.Command);
+                if (blockedCommands.Contains(normalizedCandidate))
+                {
+                    Console.WriteLine("│  ⚠ Blocked previously failed command pattern.");
+                    stepMessages.Add(new OllamaChatMessage { Role = "assistant", Content = rawResponse });
+                    stepMessages.Add(new OllamaChatMessage
+                    {
+                        Role = "user",
+                        Content = "This command pattern already failed multiple times and is blocked. "
+                                  + "Choose a different approach that directly advances the deliverable.",
+                    });
+                    continue;
+                }
+
                 Console.WriteLine($"│  $ {cmd.Command}");
                 stepOutput.AppendLine("```shell");
                 stepOutput.AppendLine($"$ {cmd.Command}");
@@ -299,6 +362,27 @@ public class AgentService
 
                 var (stdout, stderr, exitCode) = await _docker.ExecuteCommandAsync(
                     cmd.Command, SandboxWorkDir, cancellationToken);
+
+                var normalizedCommand = normalizedCandidate;
+                if (exitCode != 0)
+                {
+                    failedCommandCounts.TryGetValue(normalizedCommand, out int failures);
+                    failures++;
+                    failedCommandCounts[normalizedCommand] = failures;
+
+                    if (failures >= MaxSameCommandFailures)
+                    {
+                        blockedCommands.Add(normalizedCommand);
+                        Console.WriteLine("│  ⚠ Repeated failure for same command – enforcing strategy reset.");
+                        stepMessages.Add(new OllamaChatMessage { Role = "assistant", Content = rawResponse });
+                        stepMessages.Add(new OllamaChatMessage
+                        {
+                            Role = "user",
+                            Content = PromptLibrary.ErrorRecovery.StrategyReset(new[] { cmd.Command })
+                                      + "\nDo NOT run this same command pattern again in this step.",
+                        });
+                    }
+                }
 
                 _log.LogSandboxCommand(step.StepNumber, iteration + 1, cmd.Command, stdout, stderr, exitCode);
 
@@ -389,11 +473,19 @@ public class AgentService
             $"find {SandboxWorkDir} -maxdepth {MaxWorkspaceFindDepth} -type f -size +{MinimumDeliverableFileSizeBytes}c 2>/dev/null",
             cancellationToken: cancellationToken);
 
-        if (!string.IsNullOrWhiteSpace(substantialFiles))
+        var (placeholderMatches, _, _) = await FindPlaceholderTokensAsync(cancellationToken);
+
+        if (!string.IsNullOrWhiteSpace(substantialFiles) && string.IsNullOrWhiteSpace(placeholderMatches))
         {
             Console.WriteLine("  Workspace already contains non-empty deliverable files.");
             Console.WriteLine($"  Files: {substantialFiles.Replace('\n', ' ')}");
             return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(placeholderMatches))
+        {
+            Console.WriteLine("  Placeholder tokens detected in workspace files; remediation required.");
+            Console.WriteLine($"  Matches:\n{placeholderMatches}");
         }
 
         Console.WriteLine($"  Workspace state:\n{lsOutput}");
@@ -417,6 +509,7 @@ public class AgentService
         Console.WriteLine("│");
 
         bool finalized = false;
+        int finalizationPlaceholderViolations = 0;
         for (int iteration = 0; iteration < MaxIterationsPerStep; iteration++)
         {
             Console.WriteLine($"│  [finalization iteration {iteration + 1}]");
@@ -450,7 +543,9 @@ public class AgentService
                     $"find {SandboxWorkDir} -maxdepth {MaxWorkspaceFindDepth} -type f -size +{MinimumDeliverableFileSizeBytes}c 2>/dev/null",
                     cancellationToken: cancellationToken);
 
-                if (!string.IsNullOrWhiteSpace(verifyFiles))
+                var (placeholderMatchesOnDone, _, _) = await FindPlaceholderTokensAsync(cancellationToken);
+
+                if (!string.IsNullOrWhiteSpace(verifyFiles) && string.IsNullOrWhiteSpace(placeholderMatchesOnDone))
                 {
                     Console.WriteLine("│  ✓ Deliverables finalized.");
                     finalized = true;
@@ -464,9 +559,10 @@ public class AgentService
                 finalMessages.Add(new OllamaChatMessage
                 {
                     Role = "user",
-                    Content = $"You set done=true but the workspace is still empty. "
-                              + $"You MUST run a shell command (e.g. a heredoc) to write the COMPLETE content to {SandboxWorkDir}. "
-                              + $"Do NOT set done=true until the file is written and verified with `ls -lh {SandboxWorkDir}`.",
+                    Content = $"You set done=true but completion criteria failed. "
+                              + $"Workspace files must exist AND contain no unresolved placeholders. "
+                              + $"You MUST run a shell command (e.g. a heredoc) to write/fix content in {SandboxWorkDir}. "
+                              + $"Do NOT set done=true until files are written and validated with `ls -lh` and placeholder scan.",
                 });
                 continue;
             }
@@ -486,6 +582,27 @@ public class AgentService
             }
             else
             {
+                if (ContainsPlaceholderToken(cmd.Command))
+                {
+                    finalizationPlaceholderViolations++;
+                    Console.WriteLine("│  ⚠ Blocked finalization command with unresolved placeholder token.");
+                    finalMessages.Add(new OllamaChatMessage { Role = "assistant", Content = rawResponse });
+                    finalMessages.Add(new OllamaChatMessage
+                    {
+                        Role = "user",
+                        Content = "Your command contains unresolved placeholders like ProjectName. "
+                                  + "Use concrete existing file/folder names from /workspace.",
+                    });
+
+                    if (finalizationPlaceholderViolations >= MaxPlaceholderViolationsPerStep)
+                    {
+                        Console.WriteLine("│  ⚠ Finalization placeholder limit reached.");
+                        break;
+                    }
+
+                    continue;
+                }
+
                 Console.WriteLine($"│  $ {cmd.Command}");
                 var (stdout, stderr, exitCode) = await _docker.ExecuteCommandAsync(
                     cmd.Command, SandboxWorkDir, cancellationToken);
@@ -508,6 +625,22 @@ public class AgentService
                              + $"stdout:\n{stdout}\n"
                              + $"stderr:\n{stderr}",
                 });
+
+                if (exitCode == 0)
+                {
+                    var (matches, _, _) = await FindPlaceholderTokensAsync(cancellationToken);
+                    if (!string.IsNullOrWhiteSpace(matches))
+                    {
+                        finalMessages.Add(new OllamaChatMessage
+                        {
+                            Role = "user",
+                            Content = "Placeholder tokens still exist in workspace files. Replace all unresolved "
+                                      + "tokens (ProjectName, TODO_PROJECT, __PROJECT__, <project-name>, <name>) "
+                                      + "before setting done=true. Current matches:\n"
+                                      + matches,
+                        });
+                    }
+                }
             }
         }
 
@@ -604,7 +737,25 @@ public class AgentService
     /// so that variants like "pip3 install dotnet" and "pip3  install dotnet" match.
     /// </summary>
     private static string NormalizeCommand(string command) =>
-        System.Text.RegularExpressions.Regex.Replace(command.Trim(), @"\s+", " ");
+        Regex.Replace(command.Trim(), @"\s+", " ");
+
+    private static bool ContainsPlaceholderToken(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return false;
+
+        return PlaceholderTokens.Any(token =>
+            value.Contains(token, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private async Task<(string Output, string Error, long ExitCode)> FindPlaceholderTokensAsync(
+        CancellationToken cancellationToken)
+    {
+        const string grepPattern = "ProjectName|TODO_PROJECT|__PROJECT__|<project[-_ ]?name>|<name>";
+        return await RunInternalCommandAsync(
+            $"grep -RInE '{grepPattern}' {SandboxWorkDir} --exclude-dir=.git 2>/dev/null || true",
+            cancellationToken: cancellationToken);
+    }
 
     /// <summary>
     /// Executes a shell command in the sandbox, echoing the command to the console before

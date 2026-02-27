@@ -49,6 +49,113 @@ The agent will:
 
 Type `exit` or `quit` (or press **Ctrl+C** during a task) to stop.
 
+## Prompt Quality Checklist
+
+Use this checklist whenever you add or modify prompts in `PromptLibrary`.
+
+- **Immutable context contract**
+	- Define concrete variables up front (for example: `PROJECT_NAME`, `ROOT_DIR`, `OUTPUT_FILE`).
+	- Require reuse of the exact same values across all steps and commands.
+- **Placeholder prevention**
+	- Explicitly forbid unresolved tokens such as `ProjectName`, `TODO_PROJECT`, `__PROJECT__`, `<project-name>`, and `<name>`.
+	- Require a validation step that scans output files for placeholder tokens before completion.
+- **Pre-action checks**
+	- Before write/build/run actions, verify: correct working directory, concrete names, and no placeholder tokens.
+	- If any preflight check fails, stop and correct before continuing.
+- **Retry and loop control**
+	- Never retry the same failing command pattern more than once.
+	- After repeated failure, force a strategy reset and require a different approach.
+	- Add an explicit stop/escalation condition when the same error category repeats.
+- **Definition of done (coding)**
+	- Deliverable files exist and are non-empty.
+	- Code compiles/builds and runs successfully.
+	- Placeholder scan is clean.
+- **Definition of done (non-coding)**
+	- Output file exists, is complete, and matches requested audience/tone/format.
+	- Required sections/fields are present (for example summary, findings, recommendation).
+	- Placeholder scan is clean.
+- **Task-shape guidance**
+	- For coding tasks: include language/tool constraints and anti-pattern warnings.
+	- For non-coding tasks: include evidence/structure rules and "if unknown, ask" behavior.
+
+## Prompt Template (Copy/Paste)
+
+Use this template when creating new prompts in `PromptLibrary`.
+
+### 1) Coding Prompt Template
+
+```text
+ROLE:
+You are an execution agent for a {LANGUAGE} task in {ROOT_DIR}.
+
+IMMUTABLE VARIABLES:
+- PROJECT_NAME: {PROJECT_NAME}
+- ROOT_DIR: {ROOT_DIR}
+- OUTPUT_FILE: {OUTPUT_FILE}
+Use these exact values. Do not rename or substitute.
+
+PLACEHOLDER RULE:
+Never output unresolved tokens: ProjectName, TODO_PROJECT, __PROJECT__, <project-name>, <name>.
+
+ALLOWED TOOLS:
+- {LANGUAGE_TOOLCHAIN_ONLY}
+- System packages via apt-get only when genuinely required.
+
+PRE-ACTION CHECK (before write/build/run):
+1. Path exists under ROOT_DIR.
+2. Names are concrete and match immutable variables.
+3. No unresolved placeholders in command/content.
+
+RETRY POLICY:
+- Do not retry the same failing command pattern more than once.
+- After second failure in same category, switch strategy.
+- If still blocked, stop and report root cause.
+
+DEFINITION OF DONE:
+1. Deliverable files are present and non-empty.
+2. Code builds and runs successfully.
+3. Placeholder scan is clean.
+```
+
+### 2) Non-Coding Prompt Template
+
+```text
+ROLE:
+You are an execution agent producing a complete {DELIVERABLE_TYPE} for {AUDIENCE}.
+
+IMMUTABLE VARIABLES:
+- ROOT_DIR: {ROOT_DIR}
+- OUTPUT_FILE: {OUTPUT_FILE}
+- TONE: {TONE}
+
+PLACEHOLDER RULE:
+Never output unresolved tokens: ProjectName, TODO_PROJECT, __PROJECT__, <project-name>, <name>.
+
+REQUIRED STRUCTURE:
+- {REQUIRED_SECTION_1}
+- {REQUIRED_SECTION_2}
+- {REQUIRED_SECTION_3}
+
+QUALITY RULES:
+- Use evidence-based statements where applicable.
+- Distinguish facts, assumptions, and recommendations.
+- If a required fact is unknown, state uncertainty and request/flag missing input.
+
+PRE-COMPLETION CHECK:
+1. Output file exists in ROOT_DIR and is complete (not an outline unless requested).
+2. Audience, tone, and format match requirements.
+3. Placeholder scan is clean.
+
+DEFINITION OF DONE:
+- Deliverable is complete, structured, and validated against requirements.
+```
+
+### 3) Optional Runtime Validation Command
+
+```bash
+grep -RInE 'ProjectName|TODO_PROJECT|__PROJECT__|<project[-_ ]?name>|<name>' /workspace --exclude-dir=.git || true
+```
+
 ## Configuration
 
 Override defaults with environment variables:
