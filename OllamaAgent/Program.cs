@@ -7,9 +7,15 @@ var ollamaUrl = Environment.GetEnvironmentVariable("OLLAMA_URL") ?? "http://loca
 
 // ── Banner ────────────────────────────────────────────────────────────────────
 Console.WriteLine();
-Console.WriteLine("╔══════════════════════════════════════════╗");
-Console.WriteLine("║          O l l a m a  A g e n t          ║");
-Console.WriteLine("╚══════════════════════════════════════════╝");
+Console.WriteLine("  ██╗     ██╗   ██╗ ██████╗  █████╗ ");
+Console.WriteLine("  ██║     ██║   ██║██╔═══██╗██╔══██╗");
+Console.WriteLine("  ██║     ██║   ██║██║   ██║███████║");
+Console.WriteLine("  ██║     ██║   ██║██║   ██║██╔══██║");
+Console.WriteLine("  ███████╗╚██████╔╝██║   ██║██║  ██║");
+Console.WriteLine("  ╚══════╝ ╚═════╝ ╚═╝   ╚═╝╚═╝  ╚═╝");
+Console.WriteLine();
+Console.WriteLine("Local-Universal-Neural-Agent (LUNA)");
+Console.WriteLine($"  Version: 0.2.0");
 Console.WriteLine($"  Model : {ollamaModel}");
 Console.WriteLine($"  Ollama: {ollamaUrl}");
 Console.WriteLine();
